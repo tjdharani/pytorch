@@ -7,8 +7,7 @@
 
 #include <utility>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 void update_source_range_and_cs_ptr(
@@ -94,7 +93,7 @@ void SubgraphRewriter::rewriteSinglePatternOnGraph(
 
   // First construct map of Node*-to-Node*
   // This maps Nodes in replacement graph to nodes in pattern graph
-  // given the value_name_map, which maps value names from repalcement
+  // given the value_name_map, which maps value names from replacement
   // pattern to value name in pattern
   std::unordered_map<Node*, Node*> pattern_node_map;
   std::set<const Node*> pattern_input_nodes;
@@ -220,5 +219,4 @@ Module PatternBasedRewrite(const Module& module) {
   return subgraph_rewriter.runOnModule(module);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

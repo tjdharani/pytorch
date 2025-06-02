@@ -10,9 +10,7 @@
 #include <torch/csrc/distributed/rpc/rpc_agent.h>
 #include <torch/csrc/distributed/rpc/types.h>
 
-namespace torch {
-namespace distributed {
-namespace autograd {
+namespace torch::distributed::autograd {
 
 using torch::distributed::autograd::AutogradMetadata;
 using torch::distributed::autograd::RpcWithAutograd;
@@ -76,7 +74,7 @@ ContextPtr addRecvRpcBackward(
   return autogradContext;
 }
 
-c10::intrusive_ptr<Message> getMessageWithProfiling(
+static c10::intrusive_ptr<Message> getMessageWithProfiling(
     c10::intrusive_ptr<torch::distributed::rpc::Message> wrappedRpcMessage,
     MessageType msgType,
     torch::autograd::profiler::ProfilerConfig&& profilerConfig) {
@@ -180,6 +178,4 @@ c10::intrusive_ptr<JitFuture> sendMessageWithAutograd(
   ;
 }
 
-} // namespace autograd
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::autograd

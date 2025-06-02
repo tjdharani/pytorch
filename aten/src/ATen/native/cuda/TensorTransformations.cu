@@ -57,7 +57,7 @@ __global__ void flip_cuda_kernel(
     int64_t* strides_contiguous,
     int64_t* shape,
     int64_t total_dims) {
-  int64_t linear_index = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t linear_index = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
   if (linear_index >= N) {
     return;
   }
@@ -82,7 +82,7 @@ __global__ void flip_cuda_kernel(
 template <typename scalar_t>
 C10_LAUNCH_BOUNDS_1(cuda::getApplyBlockSize())
 __global__ void roll_cuda_kernel(
-    scalar_t* in_tensor,
+    const scalar_t* in_tensor,
     scalar_t* out_tensor,
     int64_t N,
     int64_t roll_dim,
@@ -90,7 +90,7 @@ __global__ void roll_cuda_kernel(
     int64_t size,
     int64_t stride,
     int64_t total_dims) {
-  int64_t linear_index = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t linear_index = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
   if (linear_index >= N) {
     return;
   }
@@ -140,7 +140,7 @@ Tensor roll_cuda(const Tensor& self, IntArrayRef shifts, IntArrayRef dims) {
       in_tensor.scalar_type(), "roll_cuda",
       [&] {
         roll_cuda_kernel<<<dim_grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(
-          in_tensor.data_ptr<scalar_t>(), out_tensor.data_ptr<scalar_t>(), N,
+          in_tensor.const_data_ptr<scalar_t>(), out_tensor.mutable_data_ptr<scalar_t>(), N,
           dim, start,
           size,
           in_tensor.stride(dim),

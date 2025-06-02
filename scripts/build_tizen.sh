@@ -9,7 +9,7 @@
 
 setup_environment(){
 # The rootfs image for a Tizen target (RPi3)is located at the below webpage:
-# http://download.tizen.org/releases/milestone/tizen/4.0.m1/tizen-unified_20170529.1/images/
+# https://cdn.download.tizen.org/archive/releases/milestone/tizen/4.0.m1/tizen-unified_20170529.1/images/
 # If you do not have a Tizen device, Please, run qemu-arm-static and chroot command.
 # $ sudo chroot ~/tizen-rootfs qemu-arm-static /usr/bin/bash
 
@@ -25,7 +25,7 @@ caffe2_lite_dep_packages(){
 # You can set-up a rpm repository with zypper, yum, and dnf because Tizen
 # software platform officially support rpm format such as Fedora, OpenSUSE.
 # The official Tizen repository is as following:
-# http://download.tizen.org/releases/milestone/tizen/4.0.m1/
+# https://cdn.download.tizen.org/archive/releases/milestone/tizen/4.0.m1/
 echo "Installing dependencies."
 sudo zypper install \
   make \
@@ -55,9 +55,6 @@ cmake .. \
     -DRUN_HAVE_POSIX_REGEX=0 \
     -DHAVE_GNU_POSIX_REGEX=0 \
     -DUSE_MPI=OFF -DUSE_OPENMP=OFF \
-    -DUSE_ROCKSDB=OFF \
-    -DUSE_LEVELDB=OFF \
-    -DUSE_LMDB=OFF \
     -DBUILD_PYTHON=OFF \
     -DUSE_GLOO=OFF \
     -DUSE_OPENCV=OFF \
@@ -72,7 +69,7 @@ caffe2_full_dep_packages(){
 # You can set-up a rpm repository with zypper, yum, and dnf because Tizen
 # software platform officially support rpm format such as Fedora, OpenSUSE.
 # The official Tizen repository is as following:
-# http://download.tizen.org/releases/milestone/tizen/4.0.m1/
+# https://cdn.download.tizen.org/archive/releases/milestone/tizen/4.0.m1/
 echo "Installing dependencies."
 sudo zypper install \
   cmake \
@@ -84,10 +81,7 @@ sudo zypper install \
 # Obtain optional dependencies that are usually useful to have.
 echo "Installing optional dependencies."
 sudo zypper install \
-  libleveldb-dev \
-  liblmdb-dev \
   libpython-dev \
-  libsnappy-dev \
   python-numpy \
   python-pip \
   python-protobuf
@@ -110,7 +104,6 @@ cmake "$CAFFE2_ROOT" \
     -DUSE_CUDA=OFF \
     -DUSE_ITT=OFF \
     -DUSE_OPENCV=OFF \
-    -DUSE_LMDB=OFF \
     -DCAFFE2_CPU_FLAGS="-mfpu=neon -mfloat-abi=soft" \
     || exit 1
 

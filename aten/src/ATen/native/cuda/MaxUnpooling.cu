@@ -51,21 +51,21 @@ __global__ void max_unpooling2d_forward_kernel(
 
 template <typename T>
 __global__ void max_unpooling3d_forward_kernel(
-    PackedTensorAccessor64<T, 4> input,
-    PackedTensorAccessor64<int64_t, 4> indices,
+    PackedTensorAccessor64<const T, 4> input,
+    PackedTensorAccessor64<const int64_t, 4> indices,
     T* output,
     const int64_t oT,
     const int64_t oH,
     const int64_t oW,
     const int64_t offsetZ) {
-  int64_t iColumn = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t iColumn = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
   int64_t iRow = blockIdx.y * blockDim.y + threadIdx.y;
   int64_t iFrame = (blockIdx.z + offsetZ) % input.size(1); // input frame/time
   int64_t slice = (blockIdx.z + offsetZ) / input.size(1); // input slice/feature
   int64_t outputImageSize = oT * oH * oW;
   if (iRow < input.size(2) && iColumn < input.size(3)) {
-    T val = input[slice][iFrame][iRow][iColumn];
-    int64_t index = indices[slice][iFrame][iRow][iColumn];
+    const T val = input[slice][iFrame][iRow][iColumn];
+    const int64_t index = indices[slice][iFrame][iRow][iColumn];
     CUDA_KERNEL_ASSERT(index >= 0 && index < outputImageSize);
     output[slice * oT * oH * oW + index] = val;
   }
@@ -93,7 +93,7 @@ __global__ void max_unpooling2d_backward_kernel(
 
 template <typename T>
 __global__ void max_unpooling3d_backward_kernel(
-    T* gradOutputData,
+    const T* gradOutputData,
     int64_t oT,
     int64_t oH,
     int64_t oW,
@@ -147,7 +147,7 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
       "Expected shape of indices to be: ", self_.sizes(), " but got: ", indices_.sizes());
   TORCH_CHECK(
       output_size.size() == 2,
-      "There should be exactly two elements (width, height) in output_size, but got ", output_size.size(), " elements.");
+      "There should be exactly two elements (height, width) in output_size, but got ", output_size.size(), " elements.");
 
   int64_t dimw = 2;
   int64_t dimh = 1;
@@ -175,7 +175,7 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
 
   auto count = self.numel();
   if (count != 0) {
-    AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+    AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
         self.scalar_type(), "max_unpooling2d_forward_kernel", ([&] {
           max_unpooling2d_forward_kernel<<<
               GET_BLOCKS(count),
@@ -183,14 +183,14 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
               0,
               at::cuda::getCurrentCUDAStream()>>>(
               self.numel(),
-              self.data_ptr<scalar_t>(),
-              indices.data_ptr<int64_t>(),
+              self.const_data_ptr<scalar_t>(),
+              indices.const_data_ptr<int64_t>(),
               numChannels,
               inputHeight,
               inputWidth,
               oheight,
               owidth,
-              output.data_ptr<scalar_t>());
+              output.mutable_data_ptr<scalar_t>());
           C10_CUDA_KERNEL_LAUNCH_CHECK();
         }));
   }
@@ -267,7 +267,7 @@ static void max_unpooling3d_shape_check(
   if (gradOutput.defined()) {
     if (oT != gradOutput.size(dimt) || oH != gradOutput.size(dimh) ||
         oW != gradOutput.size(dimw)) {
-      AT_ERROR(
+      TORCH_CHECK(false,
           "Inconsistent gradOutput size. oT= ",
           oT,
           ", oH= ",
@@ -358,7 +358,7 @@ Tensor& max_unpooling3d_forward_out_cuda(const Tensor& self_,
   int offsetZ = 0;
   dim3 block(32, 8);
 
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
       self.scalar_type(), "max_unpooling3d_forward_kernel", ([&] {
         while (totalZ > 0) {
           dim3 grid(
@@ -370,9 +370,9 @@ Tensor& max_unpooling3d_forward_out_cuda(const Tensor& self_,
               block,
               0,
               at::cuda::getCurrentCUDAStream()>>>(
-              self.packed_accessor64<scalar_t, 4>(),
-              indices.packed_accessor64<int64_t, 4>(),
-              output.data_ptr<scalar_t>(),
+              self.packed_accessor64<const scalar_t, 4>(),
+              indices.packed_accessor64<const int64_t, 4>(),
+              output.mutable_data_ptr<scalar_t>(),
               oT,
               oH,
               oW,
@@ -447,7 +447,7 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
   nInputRows = self.size(dimh);
 
   if (oheight != grad_output.size(dimh) || owidth != grad_output.size(dimw)) {
-    AT_ERROR(
+    TORCH_CHECK(false,
         "Inconsistent gradOutput size. output height: ",
         oheight,
         ", output width= ",
@@ -466,7 +466,7 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
     return grad_input;
   }
 
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
       self.scalar_type(), "max_unpooling2d_backward_kernel", ([&] {
         max_unpooling2d_backward_kernel<<<
             GET_BLOCKS(count),
@@ -474,14 +474,14 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
             0,
             at::cuda::getCurrentCUDAStream()>>>(
             count,
-            grad_output.data_ptr<scalar_t>(),
-            indices.data_ptr<int64_t>(),
+            grad_output.const_data_ptr<scalar_t>(),
+            indices.const_data_ptr<int64_t>(),
             nInputPlane,
             nInputRows,
             nInputCols,
             oheight,
             owidth,
-            grad_input.data_ptr<scalar_t>());
+            grad_input.mutable_data_ptr<scalar_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));
   return grad_input;
@@ -569,7 +569,7 @@ at::Tensor& max_unpooling3d_backward_out_cuda(const Tensor& grad_output_,
 
   dim3 block(32, 8);
 
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16,
       self.scalar_type(), "max_unpooling3d_backward_kernel", ([&] {
         while (totalZ > 0) {
           dim3 grid(
@@ -581,7 +581,7 @@ at::Tensor& max_unpooling3d_backward_out_cuda(const Tensor& grad_output_,
               block,
               0,
               at::cuda::getCurrentCUDAStream()>>>(
-              grad_output.data_ptr<scalar_t>(),
+              grad_output.const_data_ptr<scalar_t>(),
               oT,
               oH,
               oW,

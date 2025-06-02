@@ -1,8 +1,3 @@
-if exist "%TMP_DIR%/ci_scripts/pytorch_env_restore.bat" (
-    call %TMP_DIR%/ci_scripts/pytorch_env_restore.bat
-    exit /b 0
-)
-
 set PATH=C:\Program Files\CMake\bin;C:\Program Files\7-Zip;C:\ProgramData\chocolatey\bin;C:\Program Files\Git\cmd;C:\Program Files\Amazon\AWSCLI;C:\Program Files\Amazon\AWSCLI\bin;%PATH%
 
 :: Install Miniconda3
@@ -45,7 +40,6 @@ set CUDA_PATH_V%VERSION_SUFFIX%=%CUDA_PATH%
 set CUDNN_LIB_DIR=%CUDA_PATH%\lib\x64
 set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
 set CUDNN_ROOT_DIR=%CUDA_PATH%
-set NVTOOLSEXT_PATH=C:\Program Files\NVIDIA Corporation\NvToolsExt
 set PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%
 set NUMBAPRO_CUDALIB=%CUDA_PATH%\bin
 set NUMBAPRO_LIBDEVICE=%CUDA_PATH%\nvvm\libdevice
@@ -55,16 +49,5 @@ set NUMBAPRO_NVVM=%CUDA_PATH%\nvvm\bin\nvvm64_32_0.dll
 
 set PYTHONPATH=%TMP_DIR_WIN%\build;%PYTHONPATH%
 
-@echo off
-echo @echo off >> %TMP_DIR_WIN%/ci_scripts/pytorch_env_restore.bat
-for /f "usebackq tokens=*" %%i in (`set`) do echo set "%%i" >> %TMP_DIR_WIN%/ci_scripts/pytorch_env_restore.bat
-@echo on
-
-if NOT "%BUILD_ENVIRONMENT%" == "" (
-  :: Create a shortcut to restore pytorch environment
-  echo @echo off >> %TMP_DIR_WIN%/ci_scripts/pytorch_env_restore_helper.bat
-  echo call "%TMP_DIR_WIN%/ci_scripts/pytorch_env_restore.bat" >> %TMP_DIR_WIN%/ci_scripts/pytorch_env_restore_helper.bat
-  echo cd /D "%CD%" >> %TMP_DIR_WIN%/ci_scripts/pytorch_env_restore_helper.bat
-
-  aws s3 cp "s3://ossci-windows/Restore PyTorch Environment.lnk" "C:\Users\circleci\Desktop\Restore PyTorch Environment.lnk"
-)
+:: Print all existing environment variable for debugging
+set

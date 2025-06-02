@@ -1,36 +1,24 @@
-if(UNIX)
-  # prevent Unknown CMake command "check_function_exists".
-  include(CheckFunctionExists)
-endif()
-include(CheckIncludeFile)
-include(CheckCSourceCompiles)
-include(CheckCSourceRuns)
-include(CheckCCompilerFlag)
 include(CheckCXXSourceCompiles)
 include(CheckCXXCompilerFlag)
 include(CMakePushCheckState)
 
-set(CAFFE2_USE_EXCEPTION_PTR 1)
-
 # ---[ Check if we want to turn off deprecated warning due to glog.
-# Note(jiayq): on ubuntu 14.04, the default glog install uses ext/hash_set that
-# is being deprecated. As a result, we will test if this is the environment we
-# are building under. If yes, we will turn off deprecation warning for a
-# cleaner build output.
-cmake_push_check_state(RESET)
-set(CMAKE_REQUIRED_FLAGS "-std=c++14")
-CHECK_CXX_SOURCE_COMPILES(
-    "#include <glog/stl_logging.h>
-    int main(int argc, char** argv) {
-      return 0;
-    }" CAFFE2_NEED_TO_TURN_OFF_DEPRECATION_WARNING
-    FAIL_REGEX ".*-Wno-deprecated.*")
+if(USE_GLOG)
+  cmake_push_check_state(RESET)
+  set(CMAKE_REQUIRED_FLAGS "-std=c++17")
+  CHECK_CXX_SOURCE_COMPILES(
+      "#include <glog/stl_logging.h>
+      int main(int argc, char** argv) {
+        return 0;
+      }" CAFFE2_NEED_TO_TURN_OFF_DEPRECATION_WARNING
+      FAIL_REGEX ".*-Wno-deprecated.*")
 
-if(NOT CAFFE2_NEED_TO_TURN_OFF_DEPRECATION_WARNING AND NOT MSVC)
-  message(STATUS "Turning off deprecation warning due to glog.")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated")
+  if(NOT CAFFE2_NEED_TO_TURN_OFF_DEPRECATION_WARNING AND NOT MSVC)
+    message(STATUS "Turning off deprecation warning due to glog.")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated")
+  endif()
+  cmake_pop_check_state()
 endif()
-cmake_pop_check_state()
 
 # ---[ Check if the compiler has AVX/AVX2 support. We only check AVX2.
 if(NOT INTERN_BUILD_MOBILE)
@@ -80,8 +68,6 @@ CHECK_CXX_SOURCE_COMPILES(
      }" CAFFE2_COMPILER_SUPPORTS_AVX512_EXTENSIONS)
 if(CAFFE2_COMPILER_SUPPORTS_AVX512_EXTENSIONS)
   message(STATUS "Current compiler supports avx512f extension. Will build fbgemm.")
-  # Also see CMakeLists.txt under caffe2/perfkernels.
-  set(CAFFE2_PERF_WITH_AVX512 1)
 endif()
 cmake_pop_check_state()
 
@@ -113,6 +99,16 @@ endif()
 # Also, we will turn off deprecated-declarations
 # due to protobuf.
 
+# ---[ Check if the compiler has SVE support.
+find_package(ARM) # checks SVE
+if(CXX_SVE_FOUND)
+  message(STATUS "Compiler supports SVE extension. Will build perfkernels.")
+  # Also see CMakeLists.txt under caffe2/perfkernels.
+  add_compile_definitions(CAFFE2_PERF_WITH_SVE=1)
+else()
+  message(STATUS "Compiler does not support SVE extension. Will not build perfkernels.")
+endif()
+
 if(IOS AND (${IOS_ARCH} MATCHES "armv7*"))
   add_definitions("-mfpu=neon-fp16")
   add_definitions("-arch" ${IOS_ARCH})
@@ -122,7 +118,7 @@ endif()
 # ---[ Create CAFFE2_BUILD_SHARED_LIBS for macros.h.in usage.
 set(CAFFE2_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
 
-if(USE_NATIVE_ARCH)
+if(USE_NATIVE_ARCH AND NOT MSVC)
   check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
   if(COMPILER_SUPPORTS_MARCH_NATIVE)
     add_definitions("-march=native")

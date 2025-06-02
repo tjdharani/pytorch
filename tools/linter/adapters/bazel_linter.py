@@ -5,13 +5,18 @@ archive is downloaded from some sites like GitHub because it can change. Specifi
 GitHub gives no guarantee to keep the same value forever. Check for more details at
 https://github.com/community/community/discussions/46034.
 """
+
+from __future__ import annotations
+
 import argparse
 import json
 import re
+import shlex
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from enum import Enum
-from typing import List, NamedTuple, Optional, Set
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 
@@ -28,18 +33,18 @@ class LintSeverity(str, Enum):
 
 
 class LintMessage(NamedTuple):
-    path: Optional[str]
-    line: Optional[int]
-    char: Optional[int]
+    path: str | None
+    line: int | None
+    char: int | None
     code: str
     severity: LintSeverity
     name: str
-    original: Optional[str]
-    replacement: Optional[str]
-    description: Optional[str]
+    original: str | None
+    replacement: str | None
+    description: str | None
 
 
-def is_required_checksum(urls: List[Optional[str]]) -> bool:
+def is_required_checksum(urls: list[str | None]) -> bool:
     if not urls:
         return False
 
@@ -56,21 +61,19 @@ def is_required_checksum(urls: List[Optional[str]]) -> bool:
 
 def get_disallowed_checksums(
     binary: str,
-) -> Set[str]:
+) -> set[str]:
     """
     Return the set of disallowed checksums from all http_archive rules
     """
-    try:
-        # Use bazel to get the list of external dependencies in XML format
-        proc = subprocess.run(
-            [binary, "query", "kind(http_archive, //external:*)", "--output=xml"],
-            capture_output=True,
-        )
-    except OSError:
-        raise
+    # Use bazel to get the list of external dependencies in XML format
+    proc = subprocess.run(
+        [binary, "query", "kind(http_archive, //external:*)", "--output=xml"],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
 
-    stdout = str(proc.stdout, "utf-8").strip()
-    root = ET.fromstring(stdout)
+    root = ET.fromstring(proc.stdout)
 
     disallowed_checksums = set()
     # Parse all the http_archive rules in the XML output
@@ -96,8 +99,8 @@ def get_disallowed_checksums(
 
 def check_bazel(
     filename: str,
-    disallowed_checksums: Set[str],
-) -> List[LintMessage]:
+    disallowed_checksums: set[str],
+) -> list[LintMessage]:
     original = ""
     replacement = ""
 
@@ -151,6 +154,25 @@ def main() -> None:
 
     try:
         disallowed_checksums = get_disallowed_checksums(args.binary)
+    except subprocess.CalledProcessError as err:
+        err_msg = LintMessage(
+            path=None,
+            line=None,
+            char=None,
+            code=__file__,
+            severity=LintSeverity.ADVICE,
+            name="command-failed",
+            original=None,
+            replacement=None,
+            description=(
+                f"COMMAND (exit code {err.returncode})\n"
+                f"{shlex.join(err.cmd)}\n\n"
+                f"STDERR\n{err.stderr or '(empty)'}\n\n"
+                f"STDOUT\n{err.stdout or '(empty)'}"
+            ),
+        )
+        print(json.dumps(err_msg._asdict()))
+        return
     except Exception as e:
         err_msg = LintMessage(
             path=None,
@@ -164,7 +186,7 @@ def main() -> None:
             description=(f"Failed due to {e.__class__.__name__}:\n{e}"),
         )
         print(json.dumps(err_msg._asdict()), flush=True)
-        exit(0)
+        sys.exit(0)
 
     for filename in args.filenames:
         for lint_message in check_bazel(filename, disallowed_checksums):

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-from pathlib import Path
-from typing import Any, Dict, List, Set, cast
-import yaml
+
 import sys
+from pathlib import Path
+from typing import Any, cast
+
+import yaml
+
 
 GITHUB_DIR = Path(__file__).parent.parent
 
-def get_workflows_push_tags() -> Set[str]:
+
+def get_workflows_push_tags() -> set[str]:
     "Extract all known push tags from workflows"
-    rc: Set[str] = set()
+    rc: set[str] = set()
     for fname in (GITHUB_DIR / "workflows").glob("*.yml"):
         with fname.open("r") as f:
             wf_yml = yaml.safe_load(f)
@@ -21,17 +25,19 @@ def get_workflows_push_tags() -> Set[str]:
     return rc
 
 
-def filter_ciflow_tags(tags: Set[str]) -> List[str]:
-    " Return sorted list of ciflow tags"
-    return sorted(tag[:-2] for tag in tags if tag.startswith("ciflow/") and tag.endswith("/*"))
+def filter_ciflow_tags(tags: set[str]) -> list[str]:
+    "Return sorted list of ciflow tags"
+    return sorted(
+        tag[:-2] for tag in tags if tag.startswith("ciflow/") and tag.endswith("/*")
+    )
 
 
-def read_probot_config() -> Dict[str, Any]:
+def read_probot_config() -> dict[str, Any]:
     with (GITHUB_DIR / "pytorch-probot.yml").open("r") as f:
-        return cast(Dict[str, Any], yaml.safe_load(f))
+        return cast(dict[str, Any], yaml.safe_load(f))
 
 
-def update_probot_config(labels: Set[str]) -> None:
+def update_probot_config(labels: set[str]) -> None:
     orig = read_probot_config()
     orig["ciflow_push_tags"] = filter_ciflow_tags(labels)
     with (GITHUB_DIR / "pytorch-probot.yml").open("w") as f:
@@ -40,6 +46,7 @@ def update_probot_config(labels: Set[str]) -> None:
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
+
     parser = ArgumentParser("Validate or update list of tags")
     parser.add_argument("--validate-tags", action="store_true")
     args = parser.parse_args()
@@ -51,9 +58,15 @@ if __name__ == "__main__":
         if config_tags != ciflow_tags:
             print("Tags mismatch!")
             if ciflow_tags.difference(config_tags):
-                print("Reference in workflows but not in config", ciflow_tags.difference(config_tags))
+                print(
+                    "Reference in workflows but not in config",
+                    ciflow_tags.difference(config_tags),
+                )
             if config_tags.difference(ciflow_tags):
-                print("Reference in config, but not in workflows", config_tags.difference(ciflow_tags))
+                print(
+                    "Reference in config, but not in workflows",
+                    config_tags.difference(ciflow_tags),
+                )
             print(f"Please run {__file__} to remediate the difference")
             sys.exit(-1)
         print("All tags are listed in pytorch-probot.yml")

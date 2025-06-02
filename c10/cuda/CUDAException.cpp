@@ -6,14 +6,13 @@
 
 #include <string>
 
-namespace c10 {
-namespace cuda {
+namespace c10::cuda {
 
 void c10_cuda_check_implementation(
     const int32_t err,
-    const char* filename,
-    const char* function_name,
-    const int line_number,
+    const char* /*filename*/,
+    const char* /*function_name*/,
+    const int /*line_number*/,
     const bool include_device_assertions) {
   const auto cuda_error = static_cast<cudaError_t>(err);
   const auto cuda_kernel_failure = include_device_assertions
@@ -24,8 +23,7 @@ void c10_cuda_check_implementation(
     return;
   }
 
-  auto error_unused C10_UNUSED = cudaGetLastError();
-  (void)error_unused;
+  [[maybe_unused]] auto error_unused = cudaGetLastError();
 
   std::string check_message;
 #ifndef STRIP_ERROR_MESSAGES
@@ -40,9 +38,8 @@ void c10_cuda_check_implementation(
         "Device-side assertions were explicitly omitted for this error check; the error probably arose while initializing the DSA handlers.");
   }
 #endif
-
-  TORCH_CHECK(false, check_message);
+  throw c10::AcceleratorError(
+      {__func__, __FILE__, int32_t(__LINE__)}, err, check_message);
 }
 
-} // namespace cuda
-} // namespace c10
+} // namespace c10::cuda

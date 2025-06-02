@@ -4,8 +4,7 @@
 #include <ATen/NestedTensorImpl.h>
 #include <c10/macros/Macros.h>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 TORCH_API Tensor NestedTensor_to_padded_tensor_generic(
     const Tensor& t,
@@ -15,14 +14,14 @@ TORCH_API Tensor NestedTensor_to_padded_tensor_generic(
 template <typename Func>
 Tensor map_nt(const Tensor& nt, Func f) {
   auto* nt_impl = get_nested_tensor_impl(nt);
-  const auto& sizes = nt_impl->get_nested_size_tensor();
+  const auto& sizes = nt_impl->get_nested_sizes();
   return at::detail::make_tensor<NestedTensorImpl>(f(nt_impl->get_buffer()), sizes);
 }
 template <typename Func>
 Tensor map_nt_binary(const Tensor& nt_1, const Tensor& nt_2, Func f){
   auto* nt_impl_1 = get_nested_tensor_impl(nt_1);
   auto* nt_impl_2 = get_nested_tensor_impl(nt_2);
-  const auto& sizes = nt_impl_1->get_nested_size_tensor();
+  const auto& sizes = nt_impl_1->get_nested_sizes();
   return at::detail::make_tensor<NestedTensorImpl>(f(nt_impl_1->get_buffer(), nt_impl_2->get_buffer()), sizes);
 }
 
@@ -58,11 +57,11 @@ C10_ALWAYS_INLINE std::pair<int64_t, int64_t> _check_nested_layer_norm_inputs(
   int64_t N = 1;
   for (const auto i: c10::irange(normalized_ndim)) {
     TORCH_CHECK(
-      input.opt_size(-normalized_ndim + i) != c10::nullopt,
+      input.opt_size(-normalized_ndim + i).has_value(),
       "normalized_shape extends into irregular dimensions for the nested tensor"
     );
     TORCH_CHECK(
-      normalized_shape[i] == *input.opt_size(-normalized_ndim + i),
+      normalized_shape[i] == input.opt_size(-normalized_ndim + i),
       "The shape at dimension ",
       i,
       "of normalized_shape doesn't match the input"
@@ -75,5 +74,6 @@ C10_ALWAYS_INLINE std::pair<int64_t, int64_t> _check_nested_layer_norm_inputs(
   return std::make_pair(M, N);
 }
 
-} // namespace native
-} // namespace at
+Tensor reshape_nested(const Tensor& self, IntArrayRef proposed_shape);
+
+} // namespace at::native

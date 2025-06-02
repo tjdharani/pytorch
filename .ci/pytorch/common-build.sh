@@ -6,6 +6,12 @@ if [[ "$BUILD_ENVIRONMENT" != *win-* ]]; then
     # Save the absolute path in case later we chdir (as occurs in the gpu perf test)
     script_dir="$( cd "$(dirname "${BASH_SOURCE[0]}")" || exit ; pwd -P )"
 
+    if [[ "${BUILD_ENVIRONMENT}" == *-pch* ]]; then
+        # This is really weird, but newer sccache somehow produces broken binary
+        # see https://github.com/pytorch/pytorch/issues/139188
+        sudo mv /opt/cache/bin/sccache-0.2.14a /opt/cache/bin/sccache
+    fi
+
     if which sccache > /dev/null; then
         # Save sccache logs to file
         sccache --stop-server > /dev/null  2>&1 || true
@@ -31,7 +37,7 @@ if [[ "$BUILD_ENVIRONMENT" != *win-* ]]; then
             # as though sccache still gets used even when the sscache server isn't started
             # explicitly
             echo "Skipping sccache server initialization, setting environment variables"
-            export SCCACHE_IDLE_TIMEOUT=1200
+            export SCCACHE_IDLE_TIMEOUT=0
             export SCCACHE_ERROR_LOG=~/sccache_error.log
             export RUST_LOG=sccache::server=error
         elif [[ "${BUILD_ENVIRONMENT}" == *rocm* ]]; then
@@ -39,11 +45,12 @@ if [[ "$BUILD_ENVIRONMENT" != *win-* ]]; then
         else
             # increasing SCCACHE_IDLE_TIMEOUT so that extension_backend_test.cpp can build after this PR:
             # https://github.com/pytorch/pytorch/pull/16645
-            SCCACHE_ERROR_LOG=~/sccache_error.log SCCACHE_IDLE_TIMEOUT=1200 RUST_LOG=sccache::server=error sccache --start-server
+            SCCACHE_ERROR_LOG=~/sccache_error.log SCCACHE_IDLE_TIMEOUT=0 RUST_LOG=sccache::server=error sccache --start-server
         fi
 
-        # Report sccache stats for easier debugging
-        sccache --zero-stats
+        # Report sccache stats for easier debugging. It's ok if this commands
+        # timeouts and fails on MacOS
+        sccache --zero-stats || true
     fi
 
     if which ccache > /dev/null; then

@@ -1,26 +1,24 @@
-import functools
+# mypy: allow-untyped-defs
 
 import torch
+
+from .. import ir
 from ..lowering import lowerings
 from ..select_algorithm import (
     autotune_select_algorithm,
     ExternKernelChoice,
     TritonTemplate,
 )
-from ..utils import use_triton_template
+from ..utils import use_aten_gemm_kernels, use_triton_template
 from ..virtualized import V
 from .mm_common import mm_args, mm_grid, mm_options
 
+
 aten = torch.ops.aten
 
-
-def ref_mm_plus_mm(a, b, c, d, out):
-    torch.mm(a, b, out=out)
-    out.addmm_(c, d)
-    return out
-
-
-aten_mm_plus_mm = ExternKernelChoice(ref_mm_plus_mm)
+aten_mm_plus_mm = ExternKernelChoice(
+    torch.ops.inductor._mm_plus_mm, "torch::inductor::_mm_plus_mm"
+)
 
 mm_plus_mm_template = TritonTemplate(
     name="mm_plus_mm",
@@ -31,6 +29,9 @@ mm_plus_mm_template = TritonTemplate(
     M = {{size("A", 0)}}
     N = {{size("B", 1)}}
     K1 = {{size("A", 1)}}
+    if M * N == 0:
+        # early exit due to zero-size input(s)
+        return
     # K2 = {{size("C", 1)}}
     stride_am = {{stride("A", 0)}}
     stride_ak = {{stride("A", 1)}}
@@ -52,11 +53,24 @@ mm_plus_mm_template = TritonTemplate(
     group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
     pid_m = group_id * GROUP_M + (pid % group_size)
     pid_n = (pid % width) // (group_size)
+    tl.assume(pid_m >= 0)
+    tl.assume(pid_n >= 0)
 
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
-    rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
+
+    if (((stride_am == 1 and stride_ak == M) or (stride_am == K1 and stride_ak == 1))
+        and ((stride_cm == 1 and stride_ck == M) or (stride_cm == K1 and stride_ck == 1))):
+        ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
+    else:
+        ram = rm % M
+
+    if (((stride_bk == 1 and stride_bn == K1) or (stride_bk == N and stride_bn == 1))
+        and ((stride_dk == 1 and stride_dn == K1) or (stride_dk == N and stride_dn == 1))):
+        rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
+    else:
+        rbn = rn % N
+
     rk = tl.arange(0, BLOCK_K)
     A = A + (ram[:, None] * stride_am + rk[None, :] * stride_ak)
     B = B + (rk[:, None] * stride_bk + rbn[None, :] * stride_bn)
@@ -100,72 +114,53 @@ mm_plus_mm_template = TritonTemplate(
 )
 
 
-@functools.lru_cache(None)
-def mm_configs():
-    import triton
-
-    # these have been tweaked to workaround register issues
-    return [
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_stages=2, num_warps=4
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_stages=3, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32}, num_stages=4, num_warps=16
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 32, "BLOCK_K": 32}, num_stages=4, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32}, num_stages=4, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32}, num_stages=1, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64}, num_stages=1, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 128}, num_stages=1, num_warps=8
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 16}, num_stages=2, num_warps=4
-        ),
-        triton.Config(
-            {"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 16}, num_stages=1, num_warps=2
-        ),
-    ]
-
-
 def tuned_mm_plus_mm(mat1, mat2, mat3, mat4, *, layout=None):
     """
     Computes mm(mat1, mat2) + mm(mat3, mat4)
     """
-    if not V.graph.sizevars.maybe_guard_list_equals(
-        mat1.get_size(), mat3.get_size()
-    ) or not V.graph.sizevars.maybe_guard_list_equals(mat2.get_size(), mat4.get_size()):
+    m1, n1, k1, layout1, mat1, mat2 = mm_args(mat1, mat2, layout=layout)
+    m2, n2, _, layout2, mat3, mat4 = mm_args(mat3, mat4, layout=layout)
+    device_type = ir.get_device_type(mat1)
+
+    # Optimization is optional, because we can always just not do the fusion
+    if (
+        m1 * n1 == 0
+        or m2 * n2 == 0
+        or not V.graph.sizevars.statically_known_list_equals(
+            mat1.get_size(), mat3.get_size()
+        )
+        or not V.graph.sizevars.statically_known_list_equals(
+            mat2.get_size(), mat4.get_size()
+        )
+    ):
         # TODO(jansel): support different K values when this is fixed:
-        # https://github.com/openai/triton/issues/967
-        return lowerings[aten.addmm](lowerings[aten.mm](mat1, mat2), mat3, mat4)
+        # https://github.com/triton-lang/triton/issues/967
+        return lowerings[aten.add](
+            lowerings[aten.mm](mat1, mat2), lowerings[aten.mm](mat3, mat4)
+        )
 
-    m, n, k, layout, mat1, mat2 = mm_args(mat1, mat2, layout=layout)
-    m, n, k, layout, mat3, mat4 = mm_args(mat3, mat4, layout=layout)
-
+    assert layout1 == layout2
     # options to tune from
-    choices = [aten_mm_plus_mm.bind((mat1, mat2, mat3, mat4), layout)]
-    if use_triton_template(layout):
+    choices = (
+        [aten_mm_plus_mm.bind((mat1, mat2, mat3, mat4), layout1)]
+        if use_aten_gemm_kernels()
+        else []
+    )
+
+    mm_configs = V.choices.get_mm_plus_mm_configs(device_type)
+
+    if use_triton_template(layout1):
         for config in mm_configs():
-            # see https://github.com/openai/triton/issues/1298
+            # see https://github.com/triton-lang/triton/issues/1298
             # BLOCK_K = K causes llvm error
-            if config.kwargs["BLOCK_K"] < k:
-                choices.append(
-                    mm_plus_mm_template.generate(
-                        (mat1, mat2, mat3, mat4),
-                        layout,
-                        **mm_options(config, k, layout),
-                    )
+            if V.graph.sizevars.statically_known_lt(config.kwargs["BLOCK_K"], k1):
+                mm_plus_mm_template.maybe_append_choice(
+                    choices,
+                    input_nodes=(mat1, mat2, mat3, mat4),
+                    layout=layout1,
+                    **mm_options(config, m1, n1, k1, layout1),
                 )
 
-    return autotune_select_algorithm(choices, [mat1, mat2, mat3, mat4], layout)
+    return autotune_select_algorithm(
+        "mm_plus_mm", choices, [mat1, mat2, mat3, mat4], layout1
+    )

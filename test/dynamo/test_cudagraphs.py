@@ -2,16 +2,14 @@
 
 import functools
 import unittest
-from unittest.mock import patch
 
 import torch
-
 import torch._dynamo
 import torch._dynamo.config
 import torch._dynamo.test_case
 import torch._dynamo.testing
 from torch._dynamo.testing import same
-from torch.testing._internal.common_utils import TEST_WITH_ROCM
+from torch.testing._internal.common_utils import TEST_CUDA_GRAPH
 
 
 def composed(*decs):
@@ -46,8 +44,9 @@ def assert_aot_autograd_counter(ok=True):
 
 def patch_all(ok=True):
     return composed(
-        unittest.skipIf(TEST_WITH_ROCM, "ROCm not supported"),
-        torch._dynamo.config.patch(verify_correctness=True),
+        torch._dynamo.config.patch(
+            verify_correctness=True, automatic_dynamic_shapes=True
+        ),
         assert_aot_autograd_counter(ok),
     )
 
@@ -62,9 +61,9 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
         def model(x, y):
             return (x + y) * y
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x, y):
-            for i in range(N_ITERS):
+            for _ in range(N_ITERS):
                 loss = model(x, y).sum()
                 loss.backward()
 
@@ -79,9 +78,9 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
             b = a.cpu() * 3
             return b
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x, y):
-            for i in range(N_ITERS):
+            for _ in range(N_ITERS):
                 loss = model(x, y).sum()
                 loss.backward()
 
@@ -95,9 +94,9 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
             a = x + y
             return a * 3
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x, y):
-            for i in range(N_ITERS):
+            for _ in range(N_ITERS):
                 loss = model(x, y).sum()
                 loss.backward()
 
@@ -105,13 +104,12 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
         y = torch.randn((), device="cpu")
         fn(x, y)
 
-    @patch("torch._functorch.config.use_functionalize", True)
     def test_mutate_input(self):
         def model(x, y):
             y.add_(3)
             return x * y
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x, y):
             for i in range(N_ITERS):
                 with self.subTest(i):
@@ -131,7 +129,7 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
             c.add_(2)
             return x * y * 0 + c
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x, y):
             for i in range(N_ITERS):
                 with self.subTest(i):
@@ -150,7 +148,7 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
             x.add_(3)
             return x * y
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(y):
             for i in range(N_ITERS):
                 with self.subTest(i):
@@ -160,7 +158,6 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
         y = torch.randn(3, device="cuda:0", requires_grad=True)
         fn(y)
 
-    @patch("torch._functorch.config.use_functionalize", True)
     @patch_all()
     def test_mutated_metadata(self):
         # more tortured example at
@@ -171,7 +168,7 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
             x.fill_(2)
             return x
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x):
             for i in range(N_ITERS):
                 with self.subTest(i):
@@ -181,7 +178,6 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
         x = torch.empty(0, device="cuda:0")
         fn(x)
 
-    @patch("torch._functorch.config.use_functionalize", True)
     @patch_all()
     def test_dead_fill(self):
         def model(x):
@@ -191,7 +187,7 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
             y.fill_(3)
             return x, y
 
-        @torch._dynamo.optimize("cudagraphs")
+        @torch.compile(backend="cudagraphs")
         def fn(x):
             for i in range(N_ITERS):
                 with self.subTest(i):
@@ -205,5 +201,12 @@ class TestAotCudagraphs(torch._dynamo.test_case.TestCase):
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
+
+    if not TEST_CUDA_GRAPH:
+        if __name__ == "__main__":
+            import sys
+
+            sys.exit(0)
+        raise unittest.SkipTest("cuda graph test is skipped")
 
     run_tests()

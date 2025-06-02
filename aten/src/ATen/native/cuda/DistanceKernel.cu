@@ -154,7 +154,7 @@ __global__ static void cdist_backward_kernel_cuda_impl(scalar_t * buffer, const 
 template <typename scalar_t, typename F>
 __global__ static void pdist_backward_kernel_cuda_impl(scalar_t * buffer, const scalar_t * grad, const scalar_t * self, const scalar_t * dist, int64_t gs, const int64_t n, const int64_t m, const int64_t combs, const scalar_t p,
                                                        const double n2, const double n2_squared_minus_1) {
-  const int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
+  const int64_t k = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
   const int init = blockIdx.y * blockDim.y + threadIdx.y;
   const int stride = blockDim.y * gridDim.y;
 
@@ -231,7 +231,7 @@ void cdist_kernel_impl(Tensor& result, const Tensor& x1, const Tensor& x2, doubl
     } else if (std::isinf(p)) {
       impl_fptr = cdist_kernel_cuda_impl<scalar_t, dists<scalar_t>::inf>;
     }
-    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(result.data_ptr<scalar_t>(), x1.data_ptr<scalar_t>(), x2.data_ptr<scalar_t>(), p, r2, m, r_size, l1_size, l2_size);
+    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(result.mutable_data_ptr<scalar_t>(), x1.const_data_ptr<scalar_t>(), x2.const_data_ptr<scalar_t>(), p, r2, m, r_size, l1_size, l2_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
 }
@@ -257,7 +257,7 @@ void pdist_forward_kernel_impl(Tensor& result, const Tensor& self, double p) {
     } else if (std::isinf(p)) {
       impl_fptr = pdist_kernel_cuda_impl<scalar_t, dists<scalar_t>::inf>;
     }
-    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(result.data_ptr<scalar_t>(), self.data_ptr<scalar_t>(), n, m, p, n2, n2_squared_minus_1);
+    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(result.mutable_data_ptr<scalar_t>(), self.const_data_ptr<scalar_t>(), n, m, p, n2, n2_squared_minus_1);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
 }
@@ -295,7 +295,7 @@ void pdist_backward_kernel_impl(Tensor& result, const Tensor& grad, const Tensor
     } else if (std::isinf(p)) {
       impl_fptr = pdist_backward_kernel_cuda_impl<scalar_t, dists<scalar_t>::inf>;
     }
-    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(buffer.data_ptr<scalar_t>(), grad.data_ptr<scalar_t>(), self.data_ptr<scalar_t>(), dist.data_ptr<scalar_t>(), grad.stride(0), n, m, dist.numel(), p, n2, n2_squared_minus_1);
+    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(buffer.mutable_data_ptr<scalar_t>(), grad.const_data_ptr<scalar_t>(), self.const_data_ptr<scalar_t>(), dist.const_data_ptr<scalar_t>(), grad.stride(0), n, m, dist.numel(), p, n2, n2_squared_minus_1);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
 
@@ -344,8 +344,8 @@ void cdist_backward_kernel_impl(Tensor& result, const Tensor& grad, const Tensor
     } else if (std::isinf(p)) {
        impl_fptr = cdist_backward_kernel_cuda_impl<scalar_t, dists<scalar_t>::inf>;
     }
-    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(buffer.data_ptr<scalar_t>(),
-      grad.data_ptr<scalar_t>(), x1.data_ptr<scalar_t>(), x2.data_ptr<scalar_t>(), dist.data_ptr<scalar_t>(),
+    impl_fptr<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(buffer.mutable_data_ptr<scalar_t>(),
+      grad.const_data_ptr<scalar_t>(), x1.const_data_ptr<scalar_t>(), x2.const_data_ptr<scalar_t>(), dist.const_data_ptr<scalar_t>(),
       p, r1, r2, m, count, r_size, l1_size, l2_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   });
@@ -357,9 +357,9 @@ void cdist_backward_kernel_impl(Tensor& result, const Tensor& grad, const Tensor
 
 } // anonymous namespace
 
-REGISTER_DISPATCH(pdist_forward_stub, &pdist_forward_kernel_impl);
-REGISTER_DISPATCH(pdist_backward_stub, &pdist_backward_kernel_impl);
-REGISTER_DISPATCH(cdist_stub, &cdist_kernel_impl);
-REGISTER_DISPATCH(cdist_backward_stub, &cdist_backward_kernel_impl);
+REGISTER_DISPATCH(pdist_forward_stub, &pdist_forward_kernel_impl)
+REGISTER_DISPATCH(pdist_backward_stub, &pdist_backward_kernel_impl)
+REGISTER_DISPATCH(cdist_stub, &cdist_kernel_impl)
+REGISTER_DISPATCH(cdist_backward_stub, &cdist_backward_kernel_impl)
 
 } // at::native

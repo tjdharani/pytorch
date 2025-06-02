@@ -1,19 +1,37 @@
 //  Copyright © 2022 Apple Inc.
-
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/mps/OperationUtils.h>
-#include <c10/util/Optional.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/constant_pad_nd_native.h>
+#include <ATen/ops/reflection_pad1d_backward_native.h>
+#include <ATen/ops/reflection_pad1d_native.h>
+#include <ATen/ops/reflection_pad2d_backward_native.h>
+#include <ATen/ops/reflection_pad2d_native.h>
+#include <ATen/ops/reflection_pad3d_backward_native.h>
+#include <ATen/ops/reflection_pad3d_native.h>
+#include <ATen/ops/replication_pad1d_backward_native.h>
+#include <ATen/ops/replication_pad1d_native.h>
+#include <ATen/ops/replication_pad2d_backward_native.h>
+#include <ATen/ops/replication_pad2d_native.h>
+#include <ATen/ops/replication_pad3d_backward_native.h>
+#include <ATen/ops/replication_pad3d_native.h>
+#endif
 
 namespace at::native {
 namespace mps {
 
 // Pad operations (1D/2D/3D forward and backward)
-Tensor& pad_out_template(Tensor& output,
-                         const Tensor& input_,
-                         IntArrayRef padding,
-                         const c10::optional<Tensor>& grad_output_opt,
-                         MPSGraphPaddingMode mode,
-                         double constantValue,
-                         const string op_name) {
+static Tensor& pad_out_template(Tensor& output,
+                                const Tensor& input_,
+                                IntArrayRef padding,
+                                const std::optional<Tensor>& grad_output_opt,
+                                MPSGraphPaddingMode mode,
+                                double constantValue,
+                                const std::string& op_name) {
   using CachedGraph = MPSUnaryGradCachedGraph;
   const int padding_size = (int)padding.size();
   int padding_dim = padding_size / 2; // either 1D, 2D, or 3D
@@ -120,7 +138,7 @@ Tensor& pad_out_template(Tensor& output,
                     ") at dimension ",
                     dim_w,
                     " of input ",
-                    ndims);
+                    input_.sizes());
 
         if (padding_dim > 1) {
           TORCH_CHECK(pad_t < input_h && pad_b < input_h,
@@ -132,7 +150,7 @@ Tensor& pad_out_template(Tensor& output,
                       ") at dimension ",
                       dim_h,
                       " of input ",
-                      ndims);
+                      input_.sizes());
         }
         if (padding_dim > 2) {
           TORCH_CHECK(pad_front < input_d && pad_back < input_d,
@@ -144,7 +162,7 @@ Tensor& pad_out_template(Tensor& output,
                       ") at dimension ",
                       dim_d,
                       " of input ",
-                      ndims);
+                      input_.sizes());
         }
       }
       outputSizes.insert(outputSizes.begin(), output_w);
@@ -214,13 +232,6 @@ Tensor& pad_out_template(Tensor& output,
         endsVec[padIdx] = @(input.size(padIdx) + padding[rightIdx]);
         endMask &= ~(1U << padIdx);
       }
-      // workaround for the right padding bug in Monterey
-    } else if (!is_macos_13_or_newer()) {
-      if (padding[rightIdx] == 1 && padding[leftIdx] == 0) {
-        rightPadVec[padIdx] = @(2);
-        endsVec[padIdx] = @(input.size(padIdx) + 2);
-        endMask &= ~(1U << padIdx);
-      }
     }
   }
   MPSShape* leftPadding = [NSArray arrayWithObjects:leftPadVec.data() count:ndims];
@@ -232,72 +243,61 @@ Tensor& pad_out_template(Tensor& output,
     dataType = MPSDataTypeInt8;
   }
 
-  MPSGraphCache* cache_ = MPSGraphCache::getInstance();
-
   @autoreleasepool {
-    string key = op_name + getTensorsStringKey({input, grad_output, output}) + ":[" + getArrayRefString(padding) +
+    std::string key = op_name + getTensorsStringKey({input, grad_output, output}) + ":[" + getArrayRefString(padding) +
         "]:" + std::to_string(constantValue);
 
-    CachedGraph* cachedGraph = cache_->LookUpAs<CachedGraph>(key);
-    if (!cachedGraph) {
-      cachedGraph = cache_->CreateCachedGraphAs<CachedGraph>(key, ^MPSCachedGraph*() {
-        CachedGraph* newCachedGraph = nil;
-        @autoreleasepool {
-          MPSGraph* mpsGraph = make_mps_graph();
-          newCachedGraph = new CachedGraph(mpsGraph);
-          newCachedGraph->inputTensor_ = mpsGraphRankedPlaceHolder(mpsGraph, dataType, getMPSShape(input));
-          const bool needsSlice = startMask != dims_mask || endMask != dims_mask;
+    auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
+      newCachedGraph->inputTensor_ = mpsGraphRankedPlaceHolder(mpsGraph, dataType, getMPSShape(input));
+      const bool needsSlice = startMask != dims_mask || endMask != dims_mask;
 
-          if (!is_backward_pass) {
-            MPSGraphTensor* padTensor = [mpsGraph padTensor:newCachedGraph->inputTensor_
-                                            withPaddingMode:mode
+      if (!is_backward_pass) {
+        MPSGraphTensor* padTensor = [mpsGraph padTensor:newCachedGraph->inputTensor_
+                                        withPaddingMode:mode
+                                            leftPadding:leftPadding
+                                           rightPadding:rightPadding
+                                          constantValue:constantValue
+                                                   name:nil];
+        // workaround for the right padding bug in Monterey
+        if (needsSlice) {
+          newCachedGraph->gradInputTensor_ =
+              [mpsGraph sliceTensor:padTensor
+                             starts:[NSArray arrayWithObjects:startsVec.data() count:ndims]
+                               ends:[NSArray arrayWithObjects:endsVec.data() count:ndims]
+                            strides:[NSArray arrayWithObjects:stridesVec.data() count:ndims]
+                          startMask:startMask
+                            endMask:endMask
+                        squeezeMask:0
+                               name:nil];
+        } else {
+          newCachedGraph->gradInputTensor_ = padTensor;
+        }
+      } else {
+        newCachedGraph->gradOutputTensor_ = mpsGraphRankedPlaceHolder(mpsGraph, dataType, getMPSShape(grad_output));
+        MPSGraphTensor* padGradTensor =
+            [mpsGraph padGradientWithIncomingGradientTensor:newCachedGraph->gradOutputTensor_
+                                               sourceTensor:newCachedGraph->inputTensor_
+                                                paddingMode:mode
                                                 leftPadding:leftPadding
                                                rightPadding:rightPadding
-                                              constantValue:constantValue
                                                        name:nil];
-            // workaround for the right padding bug in Monterey
-            if (needsSlice) {
-              newCachedGraph->gradInputTensor_ =
-                  [mpsGraph sliceTensor:padTensor
-                                 starts:[NSArray arrayWithObjects:startsVec.data() count:ndims]
-                                   ends:[NSArray arrayWithObjects:endsVec.data() count:ndims]
-                                strides:[NSArray arrayWithObjects:stridesVec.data() count:ndims]
-                              startMask:startMask
-                                endMask:endMask
-                            squeezeMask:0
-                                   name:nil];
-            } else {
-              newCachedGraph->gradInputTensor_ = padTensor;
-            }
-          } else {
-            newCachedGraph->gradOutputTensor_ = mpsGraphRankedPlaceHolder(mpsGraph, dataType, getMPSShape(grad_output));
-            MPSGraphTensor* padGradTensor =
-                [mpsGraph padGradientWithIncomingGradientTensor:newCachedGraph->gradOutputTensor_
-                                                   sourceTensor:newCachedGraph->inputTensor_
-                                                    paddingMode:mode
-                                                    leftPadding:leftPadding
-                                                   rightPadding:rightPadding
-                                                           name:nil];
-            // workaround for negative padding issue with padGradientWithIncomingGradientTensor()
-            if (needsSlice) {
-              newCachedGraph->gradInputTensor_ =
-                  [mpsGraph sliceGradientTensor:padGradTensor
-                               fwdInShapeTensor:[mpsGraph shapeOfTensor:newCachedGraph->inputTensor_ name:nil]
-                                         starts:[NSArray arrayWithObjects:startsVec.data() count:ndims]
-                                           ends:[NSArray arrayWithObjects:endsVec.data() count:ndims]
-                                        strides:[NSArray arrayWithObjects:stridesVec.data() count:ndims]
-                                      startMask:startMask
-                                        endMask:endMask
-                                    squeezeMask:0
-                                           name:nil];
-            } else {
-              newCachedGraph->gradInputTensor_ = padGradTensor;
-            }
-          }
+        // workaround for negative padding issue with padGradientWithIncomingGradientTensor()
+        if (needsSlice) {
+          newCachedGraph->gradInputTensor_ =
+              [mpsGraph sliceGradientTensor:padGradTensor
+                           fwdInShapeTensor:[mpsGraph shapeOfTensor:newCachedGraph->inputTensor_ name:nil]
+                                     starts:[NSArray arrayWithObjects:startsVec.data() count:ndims]
+                                       ends:[NSArray arrayWithObjects:endsVec.data() count:ndims]
+                                    strides:[NSArray arrayWithObjects:stridesVec.data() count:ndims]
+                                  startMask:startMask
+                                    endMask:endMask
+                                squeezeMask:0
+                                       name:nil];
+        } else {
+          newCachedGraph->gradInputTensor_ = padGradTensor;
         }
-        return newCachedGraph;
-      });
-    }
+      }
+    });
 
     Placeholder inputPlaceholder = Placeholder(cachedGraph->inputTensor_, input, nullptr, true, dataType);
     Placeholder outputPlaceholder = Placeholder(cachedGraph->gradInputTensor_, output, nullptr, true, dataType);
@@ -310,9 +310,7 @@ Tensor& pad_out_template(Tensor& output,
     if (is_backward_pass) {
       feeds[gradOutputPlaceholder.getMPSGraphTensor()] = gradOutputPlaceholder.getMPSGraphTensorData();
     }
-    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results =
-        @{outputPlaceholder.getMPSGraphTensor() : outputPlaceholder.getMPSGraphTensorData()};
-    runMPSGraph(getCurrentMPSStream(), cachedGraph->graph(), feeds, results);
+    runMPSGraph(getCurrentMPSStream(), cachedGraph->graph(), feeds, outputPlaceholder);
   }
   return output;
 }
@@ -324,7 +322,7 @@ TORCH_IMPL_FUNC(reflection_pad1d_out_mps)
   mps::pad_out_template(const_cast<Tensor&>(output),
                         input,
                         padding,
-                        c10::nullopt,
+                        std::nullopt,
                         MPSGraphPaddingModeReflect,
                         0.0,
                         "reflection_pad1d_out_mps");
@@ -347,7 +345,7 @@ TORCH_IMPL_FUNC(replication_pad1d_out_mps)
   mps::pad_out_template(const_cast<Tensor&>(output),
                         input,
                         padding,
-                        c10::nullopt,
+                        std::nullopt,
                         MPSGraphPaddingModeClampToEdge,
                         0.0,
                         "replication_pad1d_out_mps");
@@ -367,12 +365,12 @@ TORCH_IMPL_FUNC(replication_pad1d_backward_out_mps)
 
 // 2D Reflection and Replication Padding
 Tensor& reflection_pad2d_out_mps(const Tensor& input, IntArrayRef padding, Tensor& output) {
-  return mps::pad_out_template(output, input, padding, c10::nullopt, MPSGraphPaddingModeReflect, 0.0, __func__);
+  return mps::pad_out_template(output, input, padding, std::nullopt, MPSGraphPaddingModeReflect, 0.0, __func__);
 }
 
 Tensor reflection_pad2d_mps(const Tensor& input, IntArrayRef padding) {
   Tensor output = at::empty({0}, input.options());
-  return mps::pad_out_template(output, input, padding, c10::nullopt, MPSGraphPaddingModeReflect, 0.0, __func__);
+  return mps::pad_out_template(output, input, padding, std::nullopt, MPSGraphPaddingModeReflect, 0.0, __func__);
 }
 
 Tensor& reflection_pad2d_backward_out_mps(const Tensor& grad_output,
@@ -393,7 +391,7 @@ TORCH_IMPL_FUNC(replication_pad2d_out_mps)
   mps::pad_out_template(const_cast<Tensor&>(output),
                         input,
                         padding,
-                        c10::nullopt,
+                        std::nullopt,
                         MPSGraphPaddingModeClampToEdge,
                         0.0,
                         "replication_pad2d_out_mps");
@@ -418,7 +416,7 @@ TORCH_IMPL_FUNC(reflection_pad3d_out_mps)
   mps::pad_out_template(const_cast<Tensor&>(output),
                         input,
                         padding,
-                        c10::nullopt,
+                        std::nullopt,
                         MPSGraphPaddingModeReflect,
                         0.0,
                         "reflection_pad3d_out_mps");
@@ -441,7 +439,7 @@ TORCH_IMPL_FUNC(replication_pad3d_out_mps)
   mps::pad_out_template(const_cast<Tensor&>(output),
                         input,
                         padding,
-                        c10::nullopt,
+                        std::nullopt,
                         MPSGraphPaddingModeClampToEdge,
                         0.0,
                         "replication_pad3d_out_mps");
@@ -460,7 +458,7 @@ Tensor replication_pad3d_backward_mps(const Tensor& grad_output, const Tensor& i
   return mps::pad_out_template(grad_input, input, padding, grad_output, MPSGraphPaddingModeClampToEdge, 0.0, __func__);
 }
 
-// backward pass is exlicitly handled in autograd by negating the "pad" argument
+// backward pass is explicitly handled in autograd by negating the "pad" argument
 Tensor constant_pad_nd_mps(const Tensor& self, IntArrayRef pad, const Scalar& value) {
   if (pad.size() > 6) {
     TORCH_WARN_ONCE("MPS: The constant padding of more than 3 dimensions is not currently supported natively. ",
@@ -469,7 +467,7 @@ Tensor constant_pad_nd_mps(const Tensor& self, IntArrayRef pad, const Scalar& va
   }
   Tensor output = at::empty({0}, self.options());
   return mps::pad_out_template(
-      output, self, pad, c10::nullopt, MPSGraphPaddingModeConstant, value.toDouble(), __func__);
+      output, self, pad, std::nullopt, MPSGraphPaddingModeConstant, value.toDouble(), __func__);
 }
 
 } // namespace at::native

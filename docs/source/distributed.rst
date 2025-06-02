@@ -33,17 +33,17 @@ MPI supports CUDA only if the implementation used to build PyTorch supports it.
 +----------------+-----+-----+-----+-----+-----+-----+
 | all_reduce     | ✓   | ✓   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
-| reduce         | ✓   | ✘   | ✓   | ?   | ✘   | ✓   |
+| reduce         | ✓   | ✓   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
-| all_gather     | ✓   | ✘   | ✓   | ?   | ✘   | ✓   |
+| all_gather     | ✓   | ✓   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
-| gather         | ✓   | ✘   | ✓   | ?   | ✘   | ✓   |
+| gather         | ✓   | ✓   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
-| scatter        | ✓   | ✘   | ✓   | ?   | ✘   | ✓   |
+| scatter        | ✓   | ✓   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
-| reduce_scatter | ✘   | ✘   | ✘   | ✘   | ✘   | ✓   |
+| reduce_scatter | ✓   | ✓   | ✘   | ✘   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
-| all_to_all     | ✘   | ✘   | ✓   | ?   | ✘   | ✓   |
+| all_to_all     | ✓   | ✓   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
 | barrier        | ✓   | ✘   | ✓   | ?   | ✘   | ✓   |
 +----------------+-----+-----+-----+-----+-----+-----+
@@ -141,8 +141,11 @@ network bandwidth. These two environment variables have been pre-tuned by NCCL
 for some cloud providers, such as AWS or GCP.
 
 For a full list of NCCL environment variables, please refer to
-`NVIDIA NCCL's official documentation <https://docs.nvidia.com/deeplearning/sdk/nccl-developer-guide/docs/env.html>`_
+`NVIDIA NCCL's official documentation <https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html>`_
 
+You can tune NCCL communicators even further using `torch.distributed.ProcessGroupNCCL.NCCLConfig`
+and `torch.distributed.ProcessGroupNCCL.Options`. Learn more about them using `help`
+(e.g. `help(torch.distributed.ProcessGroupNCCL.NCCLConfig)`) in the interpreter.
 
 .. _distributed-basics:
 
@@ -177,12 +180,18 @@ Initialization
 --------------
 
 The package needs to be initialized using the :func:`torch.distributed.init_process_group`
-function before calling any other methods. This blocks until all processes have
-joined.
+or :func:`torch.distributed.device_mesh.init_device_mesh` function before calling any other methods.
+Both block until all processes have joined.
+
+.. warning::
+    Initialization is not thread-safe.  Process group creation should be performed from a single thread, to prevent
+    inconsistent 'UUID' assignment across ranks, and to prevent races during initialization that can lead to hangs.
 
 .. autofunction:: is_available
 
 .. autofunction:: init_process_group
+
+.. autofunction:: torch.distributed.device_mesh.init_device_mesh
 
 .. autofunction:: is_initialized
 
@@ -191,6 +200,8 @@ joined.
 .. autofunction:: is_nccl_available
 
 .. autofunction:: is_gloo_available
+
+.. autofunction:: torch.distributed.distributed_c10d.is_xccl_available
 
 .. autofunction:: is_torchelastic_launched
 
@@ -276,6 +287,13 @@ The machine with rank 0 will be used to set up all connections.
 This is the default method, meaning that ``init_method`` does not have to be specified (or
 can be ``env://``).
 
+Improving initialization time
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* ``TORCH_GLOO_LAZY_INIT`` - establishes connections on demand rather than
+  using a full mesh which can greatly improve initialization time for non all2all
+  operations.
+
 Post-Initialization
 -------------------
 
@@ -291,33 +309,37 @@ check whether the process group has already been initialized use :func:`torch.di
 
 .. autofunction:: get_world_size
 
+Shutdown
+--------
+
+It is important to clean up resources on exit by calling :func:`destroy_process_group`.
+
+The simplest pattern to follow is to destroy every process group and backend by calling
+:func:`destroy_process_group()` with the default value of None for the `group` argument, at a
+point in the training script where communications are no longer needed, usually near the
+end of main().  The call should be made once per trainer-process, not at the outer
+process-launcher level.
+
+if :func:`destroy_process_group` is not called by all ranks in a pg within the timeout duration,
+especially when there are multiple process-groups in the application e.g. for N-D parallelism,
+hangs on exit are possible.  This is because the destructor for ProcessGroupNCCL calls ncclCommAbort,
+which must be called collectively, but the order of calling ProcessGroupNCCL's destructor if called
+by python's GC is not deterministic. Calling :func:`destroy_process_group` helps by ensuring
+ncclCommAbort is called in a consistent order across ranks, and avoids calling ncclCommAbort
+during ProcessGroupNCCL's destructor.
+
+Reinitialization
+^^^^^^^^^^^^^^^^
+
+`destroy_process_group` can also be used to destroy individual process groups.  One use
+case could be fault tolerant training, where a process group may be destroyed and then
+a new one initialized during runtime.  In this case, it's critical to synchronize the trainer
+processes using some means other than torch.distributed primitives _after_ calling destroy and
+before subsequently initializing.  This behavior is currently unsupported/untested, due to
+the difficulty of achieving this synchronization, and is considered a known issue.  Please file
+a github issue or RFC if this is a use case that's blocking you.
+
 --------------------------------------------------------------------------------
-
-Distributed Key-Value Store
----------------------------
-
-The distributed package comes with a distributed key-value store, which can be
-used to share information between processes in the group as well as to
-initialize the distributed package in
-:func:`torch.distributed.init_process_group` (by explicitly creating the store
-as an alternative to specifying ``init_method``.) There are 3 choices for
-Key-Value Stores: :class:`~torch.distributed.TCPStore`,
-:class:`~torch.distributed.FileStore`, and :class:`~torch.distributed.HashStore`.
-
-.. autoclass:: Store
-.. autoclass:: TCPStore
-.. autoclass:: HashStore
-.. autoclass:: FileStore
-.. autoclass:: PrefixStore
-
-.. autofunction:: torch.distributed.Store.set
-.. autofunction:: torch.distributed.Store.get
-.. autofunction:: torch.distributed.Store.add
-.. autofunction:: torch.distributed.Store.compare_set
-.. autofunction:: torch.distributed.Store.wait
-.. autofunction:: torch.distributed.Store.num_keys
-.. autofunction:: torch.distributed.Store.delete_key
-.. autofunction:: torch.distributed.Store.set_timeout
 
 Groups
 ------
@@ -339,6 +361,19 @@ an opaque group handle that can be given as a ``group`` argument to all collecti
 
 .. autofunction:: get_process_group_ranks
 
+
+DeviceMesh
+----------
+
+DeviceMesh is a higher level abstraction that manages process groups (or NCCL communicators).
+It allows user to easily create inter node and intra node process groups without worrying about
+how to set up the ranks correctly for different sub process groups, and it helps manage those
+distributed process group easily. :func:`~torch.distributed.device_mesh.init_device_mesh` function can be
+used to create new DeviceMesh, with a mesh shape describing the device topology.
+
+.. autoclass:: torch.distributed.device_mesh.DeviceMesh
+    :members:
+
 Point-to-point communication
 ----------------------------
 
@@ -357,6 +392,10 @@ as they should never be created manually, but they are guaranteed to support two
 .. autofunction:: isend
 
 .. autofunction:: irecv
+
+.. autofunction:: send_object_list
+
+.. autofunction:: recv_object_list
 
 .. autofunction:: batch_isend_irecv
 
@@ -385,8 +424,7 @@ is guaranteed to support two methods:
   returns ``True`` if the operation has been successfully enqueued onto a CUDA stream and the output can be utilized on the
   default stream without further synchronization.
 * ``wait()`` - in the case of CPU collectives, will block the process until the operation is completed. In the case
-  of CUDA collectives, will block until the operation has been successfully enqueued onto a CUDA stream and the
-  output can be utilized on the default stream without further synchronization.
+  of CUDA collectives, will block the currently active CUDA stream until the operation is completed (but will not block the CPU).
 * ``get_future()`` - returns ``torch._C.Future`` object. Supported for NCCL, also supported for most operations on GLOO
   and MPI, except for peer to peer operations.
   Note: as we continue adopting Futures and merging APIs, ``get_future()`` call might become redundant.
@@ -453,6 +491,9 @@ Collective functions
 
 .. autofunction:: monitored_barrier
 
+.. autoclass:: Work
+    :members:
+
 .. autoclass:: ReduceOp
 
 .. class:: reduce_op
@@ -461,6 +502,39 @@ Collective functions
     ``MIN``, and ``MAX``.
 
     :class:`~torch.distributed.ReduceOp` is recommended to use instead.
+
+
+Distributed Key-Value Store
+---------------------------
+
+The distributed package comes with a distributed key-value store, which can be
+used to share information between processes in the group as well as to
+initialize the distributed package in
+:func:`torch.distributed.init_process_group` (by explicitly creating the store
+as an alternative to specifying ``init_method``.) There are 3 choices for
+Key-Value Stores: :class:`~torch.distributed.TCPStore`,
+:class:`~torch.distributed.FileStore`, and :class:`~torch.distributed.HashStore`.
+
+.. autoclass:: Store
+    :members:
+    :special-members:
+
+.. autoclass:: TCPStore
+    :members:
+    :special-members: __init__
+
+.. autoclass:: HashStore
+    :members:
+    :special-members: __init__
+
+.. autoclass:: FileStore
+    :members:
+    :special-members: __init__
+
+.. autoclass:: PrefixStore
+    :members:
+    :special-members: __init__
+
 
 Profiling Collective Communication
 -----------------------------------------
@@ -476,82 +550,60 @@ Note that you can use ``torch.profiler`` (recommended, only available after 1.8.
         tensor = torch.randn(20, 10)
         dist.all_reduce(tensor)
 
-Please refer to the `profiler documentation <https://pytorch.org/docs/master/profiler.html>`__ for a full overview of profiler features.
+Please refer to the `profiler documentation <https://pytorch.org/docs/main/profiler.html>`__ for a full overview of profiler features.
 
 
 Multi-GPU collective functions
 ------------------------------
 
 .. warning::
-    The multi-GPU functions will be deprecated. If you must use them, please revisit our documentation later.
-
-If you have more than one GPU on each node, when using the NCCL and Gloo backend,
-:func:`~torch.distributed.broadcast_multigpu`
-:func:`~torch.distributed.all_reduce_multigpu`
-:func:`~torch.distributed.reduce_multigpu`
-:func:`~torch.distributed.all_gather_multigpu` and
-:func:`~torch.distributed.reduce_scatter_multigpu` support distributed collective
-operations among multiple GPUs within each node. These functions can potentially
-improve the overall distributed training performance and be easily used by
-passing a list of tensors. Each Tensor in the passed tensor list needs
-to be on a separate GPU device of the host where the function is called. Note
-that the length of the tensor list needs to be identical among all the
-distributed processes. Also note that currently the multi-GPU collective
-functions are only supported by the NCCL backend.
-
-For example, if the system we use for distributed training has 2 nodes, each
-of which has 8 GPUs. On each of the 16 GPUs, there is a tensor that we would
-like to all-reduce. The following code can serve as a reference:
-
-Code running on Node 0
-
-::
-
-    import torch
-    import torch.distributed as dist
-
-    dist.init_process_group(backend="nccl",
-                            init_method="file:///distributed_test",
-                            world_size=2,
-                            rank=0)
-    tensor_list = []
-    for dev_idx in range(torch.cuda.device_count()):
-        tensor_list.append(torch.FloatTensor([1]).cuda(dev_idx))
-
-    dist.all_reduce_multigpu(tensor_list)
-
-Code running on Node 1
-
-::
-
-    import torch
-    import torch.distributed as dist
-
-    dist.init_process_group(backend="nccl",
-                            init_method="file:///distributed_test",
-                            world_size=2,
-                            rank=1)
-    tensor_list = []
-    for dev_idx in range(torch.cuda.device_count()):
-        tensor_list.append(torch.FloatTensor([1]).cuda(dev_idx))
-
-    dist.all_reduce_multigpu(tensor_list)
-
-After the call, all 16 tensors on the two nodes will have the all-reduced value
-of 16
-
-.. autofunction:: broadcast_multigpu
-
-.. autofunction:: all_reduce_multigpu
-
-.. autofunction:: reduce_multigpu
-
-.. autofunction:: all_gather_multigpu
-
-.. autofunction:: reduce_scatter_multigpu
+    The multi-GPU functions (which stand for multiple GPUs per CPU thread) are
+    deprecated. As of today, PyTorch Distributed's preferred programming model
+    is one device per thread, as exemplified by the APIs in this document. If
+    you are a backend developer and want to support multiple devices per thread,
+    please contact PyTorch Distributed's maintainers.
 
 
-.. _distributed-launch:
+.. _object_collectives:
+
+Object collectives
+------------------
+
+.. warning::
+    Object collectives have a number of serious limitations.  Read further to determine
+    if they are safe to use for your use case.
+
+Object collectives are a set of collective-like operations that work on arbitrary
+Python objects, as long as they can be pickled.  There are various collective patterns
+implemented (e.g. broadcast, all_gather, ...) but they each roughly follow this pattern:
+
+1. convert the input object into a pickle (raw bytes), then shove it into a byte tensor
+2. communicate the size of this byte tensor to peers (first collective operation)
+3. allocate appropriately sized tensor to perform the real collective
+4. communicate the object data (second collective operation)
+5. convert raw data back into Python (unpickle)
+
+Object collectives sometimes have surprising performance or memory characteristics that lead to
+long runtimes or OOMs, and thus they should be used with caution.  Here are some common issues.
+
+**Asymmetric pickle/unpickle time** - Pickling objects can be slow, depending on the number, type and size of the objects.
+When the collective has a fan-in (e.g. gather_object), the receiving rank(s) must unpickle N times more objects than
+the sending rank(s) had to pickle, which can cause other ranks to time out on their next collective.
+
+**Inefficient tensor communication** - Tensors should be sent via regular collective APIs, not object collective APIs.
+It is possible to send Tensors via object collective APIs, but they will be serialized and deserialized (including a
+CPU-sync and device-to-host copy in the case of non-CPU tensors), and in almost every case other than debugging or
+troubleshooting code, it would be worth the trouble to refactor the code to use non-object collectives instead.
+
+**Unexpected tensor devices** - If you still want to send tensors via object collectives, there is another aspect
+specific to cuda (and possibly other accelerators) tensors.  If you pickle a tensor that is currently on `cuda:3`, and
+then unpickle it, you will get another tensor on `cuda:3` *regardless of which process you are on, or which CUDA device
+is the 'default' device for that process*.  With regular tensor collective APIs, 'output tensors' will always be on the
+same, local device, which is generally what you'd expect.
+
+Unpickling a tensor will implicitly activate a CUDA context if it is the first
+time a GPU is used by the process, which can waste significant amounts of GPU memory. This issue can be avoided by
+moving tensors to CPU before passing them as inputs to an object collective.
 
 Third-party backends
 --------------------
@@ -574,6 +626,8 @@ the new backend.
 
 .. warning::
     The support of third-party backend is experimental and subject to change.
+
+.. _distributed-launch:
 
 Launch utility
 --------------
@@ -605,6 +659,19 @@ Debugging ``torch.distributed`` applications
 
 Debugging distributed applications can be challenging due to hard to understand hangs, crashes, or inconsistent behavior across ranks. ``torch.distributed`` provides
 a suite of tools to help debug training applications in a self-serve fashion:
+
+Python Breakpoint
+^^^^^^^^^^^^^^^^^
+
+It is extremely convenient to use python's debugger in a distributed environment, but because it does not work out of the box many people do not use it at all.
+PyTorch offers a customized wrapper around pdb that streamlines the process.
+
+`torch.distributed.breakpoint` makes this process easy.  Internally, it customizes `pdb`'s breakpoint behavior in two ways but otherwise behaves as normal `pdb`.
+1. Attaches the debugger only on one rank (specified by the user).
+2. Ensures all other ranks stop, by using a `torch.distributed.barrier()` that will release once the debugged rank issues a `continue`
+3. Reroutes stdin from the child process such that it connects to your terminal.
+
+To use it, simply issue `torch.distributed.breakpoint(rank)` on all ranks, using the same value for `rank` in each case.
 
 Monitored Barrier
 ^^^^^^^^^^^^^^^^^
@@ -842,13 +909,24 @@ following matrix shows how the log level can be adjusted via the combination of 
 | ``INFO``                | ``DETAIL``                  | Trace (a.k.a. All)     |
 +-------------------------+-----------------------------+------------------------+
 
-Distributed has a custom Exception type derived from `RuntimeError` called `torch.distributed.DistBackendError`. This exception is thrown when a backend-specific error occurs. For example, if
-the `NCCL` backend is used and the user attempts to use a GPU that is not available to the `NCCL` library.
+Distributed components raise custom Exception types derived from `RuntimeError`:
 
+- `torch.distributed.DistError`: This is the base type of all distributed exceptions.
+- `torch.distributed.DistBackendError`: This exception is thrown when a backend-specific error occurs. For example, if
+  the `NCCL` backend is used and the user attempts to use a GPU that is not available to the `NCCL` library.
+- `torch.distributed.DistNetworkError`: This exception is thrown when networking
+  libraries encounter errors (ex: Connection reset by peer)
+- `torch.distributed.DistStoreError`: This exception is thrown when the Store encounters
+  an error (ex: TCPStore timeout)
+
+.. autoclass:: torch.distributed.DistError
 .. autoclass:: torch.distributed.DistBackendError
+.. autoclass:: torch.distributed.DistNetworkError
+.. autoclass:: torch.distributed.DistStoreError
 
-.. warning::
-    The DistBackendError exception type is an experimental feature is subject to change.
+If you are running single node training, it may be convenient to interactively breakpoint your script.  We offer a way to conveniently breakpoint a single rank:
+
+.. autofunction:: torch.distributed.breakpoint
 
 .. Distributed modules that are missing specific entries.
 .. Adding them here for tracking purposes until they are more permanently fixed.
@@ -863,7 +941,105 @@ the `NCCL` backend is used and the user attempts to use a GPU that is not availa
 .. py:module:: torch.distributed.nn.api
 .. py:module:: torch.distributed.nn.jit
 .. py:module:: torch.distributed.nn.jit.templates
-.. py:module:: torch.distributed.pipeline
-.. py:module:: torch.distributed.pipeline.sync
-.. py:module:: torch.distributed.pipeline.sync.skip
-.. py:module:: torch.distributed.tensor
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.ddp_zero_hook
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.debugging_hooks
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.default_hooks
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.mixed_precision_hooks
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.optimizer_overlap_hooks
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.post_localSGD_hook
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook
+.. py:module:: torch.distributed.algorithms.ddp_comm_hooks.quantization_hooks
+.. py:module:: torch.distributed.algorithms.join
+.. py:module:: torch.distributed.algorithms.model_averaging.averagers
+.. py:module:: torch.distributed.algorithms.model_averaging.hierarchical_model_averager
+.. py:module:: torch.distributed.algorithms.model_averaging.utils
+.. py:module:: torch.distributed.argparse_util
+.. py:module:: torch.distributed.c10d_logger
+.. py:module:: torch.distributed.checkpoint.api
+.. py:module:: torch.distributed.checkpoint.default_planner
+.. py:module:: torch.distributed.checkpoint.filesystem
+.. py:module:: torch.distributed.checkpoint.metadata
+.. py:module:: torch.distributed.checkpoint.optimizer
+.. py:module:: torch.distributed.checkpoint.planner
+.. py:module:: torch.distributed.checkpoint.planner_helpers
+.. py:module:: torch.distributed.checkpoint.resharding
+.. py:module:: torch.distributed.checkpoint.state_dict_loader
+.. py:module:: torch.distributed.checkpoint.state_dict_saver
+.. py:module:: torch.distributed.checkpoint.stateful
+.. py:module:: torch.distributed.checkpoint.storage
+.. py:module:: torch.distributed.checkpoint.utils
+.. py:module:: torch.distributed.collective_utils
+.. py:module:: torch.distributed.constants
+.. py:module:: torch.distributed.device_mesh
+.. py:module:: torch.distributed.distributed_c10d
+.. py:module:: torch.distributed.elastic.agent.server.api
+.. py:module:: torch.distributed.elastic.agent.server.local_elastic_agent
+.. py:module:: torch.distributed.elastic.events.api
+.. py:module:: torch.distributed.elastic.events.handlers
+.. py:module:: torch.distributed.elastic.metrics.api
+.. py:module:: torch.distributed.elastic.multiprocessing.api
+.. py:module:: torch.distributed.elastic.multiprocessing.errors.error_handler
+.. py:module:: torch.distributed.elastic.multiprocessing.errors.handlers
+.. py:module:: torch.distributed.elastic.multiprocessing.redirects
+.. py:module:: torch.distributed.elastic.multiprocessing.tail_log
+.. py:module:: torch.distributed.elastic.rendezvous.api
+.. py:module:: torch.distributed.elastic.rendezvous.c10d_rendezvous_backend
+.. py:module:: torch.distributed.elastic.rendezvous.dynamic_rendezvous
+.. py:module:: torch.distributed.elastic.rendezvous.etcd_rendezvous
+.. py:module:: torch.distributed.elastic.rendezvous.etcd_rendezvous_backend
+.. py:module:: torch.distributed.elastic.rendezvous.etcd_server
+.. py:module:: torch.distributed.elastic.rendezvous.etcd_store
+.. py:module:: torch.distributed.elastic.rendezvous.static_tcp_rendezvous
+.. py:module:: torch.distributed.elastic.rendezvous.utils
+.. py:module:: torch.distributed.elastic.timer.api
+.. py:module:: torch.distributed.elastic.timer.file_based_local_timer
+.. py:module:: torch.distributed.elastic.timer.local_timer
+.. py:module:: torch.distributed.elastic.utils.api
+.. py:module:: torch.distributed.elastic.utils.data.cycling_iterator
+.. py:module:: torch.distributed.elastic.utils.data.elastic_distributed_sampler
+.. py:module:: torch.distributed.elastic.utils.distributed
+.. py:module:: torch.distributed.elastic.utils.log_level
+.. py:module:: torch.distributed.elastic.utils.logging
+.. py:module:: torch.distributed.elastic.utils.store
+.. py:module:: torch.distributed.fsdp.api
+.. py:module:: torch.distributed.fsdp.fully_sharded_data_parallel
+.. py:module:: torch.distributed.fsdp.sharded_grad_scaler
+.. py:module:: torch.distributed.fsdp.wrap
+.. py:module:: torch.distributed.launcher.api
+.. py:module:: torch.distributed.logging_handlers
+.. py:module:: torch.distributed.nn.api.remote_module
+.. py:module:: torch.distributed.nn.functional
+.. py:module:: torch.distributed.nn.jit.instantiator
+.. py:module:: torch.distributed.nn.jit.templates.remote_module_template
+.. py:module:: torch.distributed.optim.apply_optimizer_in_backward
+.. py:module:: torch.distributed.optim.functional_adadelta
+.. py:module:: torch.distributed.optim.functional_adagrad
+.. py:module:: torch.distributed.optim.functional_adam
+.. py:module:: torch.distributed.optim.functional_adamax
+.. py:module:: torch.distributed.optim.functional_adamw
+.. py:module:: torch.distributed.optim.functional_rmsprop
+.. py:module:: torch.distributed.optim.functional_rprop
+.. py:module:: torch.distributed.optim.functional_sgd
+.. py:module:: torch.distributed.optim.named_optimizer
+.. py:module:: torch.distributed.optim.optimizer
+.. py:module:: torch.distributed.optim.post_localSGD_optimizer
+.. py:module:: torch.distributed.optim.utils
+.. py:module:: torch.distributed.optim.zero_redundancy_optimizer
+.. py:module:: torch.distributed.remote_device
+.. py:module:: torch.distributed.rendezvous
+.. py:module:: torch.distributed.rpc.api
+.. py:module:: torch.distributed.rpc.backend_registry
+.. py:module:: torch.distributed.rpc.constants
+.. py:module:: torch.distributed.rpc.functions
+.. py:module:: torch.distributed.rpc.internal
+.. py:module:: torch.distributed.rpc.options
+.. py:module:: torch.distributed.rpc.rref_proxy
+.. py:module:: torch.distributed.rpc.server_process_global_profiler
+.. py:module:: torch.distributed.tensor.parallel.api
+.. py:module:: torch.distributed.tensor.parallel.ddp
+.. py:module:: torch.distributed.tensor.parallel.fsdp
+.. py:module:: torch.distributed.tensor.parallel.input_reshard
+.. py:module:: torch.distributed.tensor.parallel.loss
+.. py:module:: torch.distributed.tensor.parallel.style
+.. py:module:: torch.distributed.utils
+.. py:module:: torch.distributed.checkpoint.state_dict

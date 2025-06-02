@@ -51,19 +51,18 @@ We may eventually upstream them into PyTorch itself along with `functorch`.
 We have to install a nightly build of PyTorch so first set up an environment:
 
 ```sh
-conda create --name dim
-conda activate dim
+python -m venv dim
+source dim/bin/activate  # or `& .\dim\Scripts\Activate.ps1` on Windows
 ```
 
 First-class dims requires a fairly recent nightly build of PyTorch so that functorch will work. You can install it using one of these commands:
 
 ```sh
-# For CUDA 10.2
-conda install pytorch torchvision torchaudio cudatoolkit=10.2 -c pytorch-nightly
-# For CUDA 11.3
-conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch-nightly
+# For CUDA
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu116
+
 # For CPU-only build
-conda install pytorch torchvision torchaudio cpuonly -c pytorch-nightly
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
 
 Install dim. You will be asked for github credentials to access the fairinternal organization.
@@ -178,7 +177,7 @@ Rule 1: Implicit Batching
 -------------------------
 **Tensor operations (e.g. `input + bias`) are implicitly batched over the union of the first-class dimensions in their inputs.**
 
-If `input` has dimensions `batch, channel` and `bias` has dimension `channel`, the output will have the union of those dimensions (`batch, channel`), and the result will computed as if there was a loop over all the first-class dimensions.[^3]
+If `input` has dimensions `batch, channel` and `bias` has dimension `channel`, the output will have the union of those dimensions (`batch, channel`), and the result will be computed as if there was a loop over all the first-class dimensions.[^3]
 
 ```py
 input_positional = torch.rand(128, 32)
@@ -193,7 +192,7 @@ print(result.dims)
 > (batch, channel)
 ```
 
-It is helpful think of operators on tensors with first-class dimensions by analogy to code with explicit loops over dimensions, with the first-class dimensions of the inputs acting as implicit `for` loops, and the values in the tensor being scalars within the body of the loop:
+It is helpful to think of operators on tensors with first-class dimensions by analogy to code with explicit loops over dimensions, with the first-class dimensions of the inputs acting as implicit `for` loops, and the values in the tensor being scalars within the body of the loop:
 
 ```py
 # mental model: loop-level analogy

@@ -5,8 +5,8 @@ So you decided to look at the source code.. let's give you a quick overview of t
 
 NestedTensors are a generalization of torch Tensors which eases working with data of different shapes and lengths. They are primarily used to represent a list of N tensors, where each tensor in the list (referred to as a tensor_component) has the same number of dimensions. The tensor_components are flattened and combined into a single NestedTensor, which includes the information required to reconstruct the original tensor_components:
 
-- nested_size_tensor_: 2d tensor of n_tensor_components x n_dims
-- nested_stride_tensor_: 2d tensor of n_tensor_components x n_dims
+- nested_sizes_: 2d tensor of n_tensor_components x n_dims
+- nested_strides_: 2d tensor of n_tensor_components x n_dims
 - storage_offsets_: 1d tensor of offsets corresponding to the start position of each tensor component
 - storage_: The storage object that contains the flattened tensor_components (defined on c10::TensorImp)
 
@@ -16,13 +16,13 @@ When constructing a NestedTensor in C++ you will likely not be using the NestedT
 
 ##  Code Structure
 
-The NestedTensor code is split into two parts: the C++ code and the Python code. The C++ code is located in [aten/src/ATen/native/nested](.) and the Python code is located in [torch/nested/__init__.py](/torch/nested/__init__.py). The C++ code is split into the following files:
+The NestedTensor code is split into two parts: the C++ code and the Python code. The C++ code is located in [aten/src/ATen/native/nested](.) and the Python code is located in [torch/nested/__init__.py](../../../../../torch/nested/__init__.py). The C++ code is split into the following files:
 
 - `NestedTensorImpl.h | NestedTensorImpl.cpp`: The NestedTensor data structure and its methods.
 - `NestedTensorUtils.h | NestedTensorUtils.cpp`: Utility functions for working with NestedTensors. (This is where you will find  `map_nested_tensor` which is discussed below in the section on implementing new functions.)
 - `NestedTensorUnaryOps.cpp`: Unary operations on NestedTensors (functions that can be efficiently implemented via map_nt)
 - `NestedTensorBinaryOps.h | NestedTensorBinaryOps.cpp`: Binary operations on NestedTensors (functions that can be efficiently implemented via NestedTensor_elementwise_Tensor which can be found in the cpp file)
-- `NestedTensorFactories.h | NestedTensorFactories.cpp`: Functions for creating NestedTensors (e.g. empty_like)
+- `NestedTensorFactories.cpp`: Functions for creating NestedTensors (e.g. empty_like)
 - `NestedTensorMath.h | NestedTensorMath.cpp`: Math functions on NestedTensors (e.g. softmax, embedding)
 - `NestedTensorMatmul.cpp`: Matmul functions on NestedTensors (e.g. matmul, linear, bmm)
 - `NestedTensorTransformerFunctions.h | NestedTensorTransformerFunctions.cpp`: Functions for enabling the BetterTransformer work stream
@@ -37,7 +37,7 @@ The definition of map_nt is:
 template <typename Func>
 Tensor map_nt(const Tensor& nt, Func f) {
   auto* nt_impl = get_nested_tensor_impl(nt);
-  const auto& sizes = nt_impl->get_nested_size_tensor();
+  const auto& sizes = nt_impl->get_nested_sizes();
   return at::detail::make_tensor<NestedTensorImpl>(f(nt_impl->get_buffer()), sizes);
 }
 ```
@@ -60,4 +60,4 @@ If performance is not your main concern and you would like to enable coverage th
 ##  Best Practices
 
 ## Testing
-Unit tests for NestedTensors can be found at [test/test_nestedtensor.py](/test/test_nestedtensor.py). If a new operator is added to NestedTensors it is important to add a unit test for it. The unit tests are run on the CI and if they fail the PR will not be merged.
+Unit tests for NestedTensors can be found at [test/test_nestedtensor.py](../../../../../test/test_nestedtensor.py). If a new operator is added to NestedTensors it is important to add a unit test for it. The unit tests are run on the CI and if they fail the PR will not be merged.

@@ -20,8 +20,7 @@
 
 using namespace torch::autograd;
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 
 namespace {
 
@@ -33,8 +32,8 @@ PyObject* THPCppFunction_call(
     return PyErr_Format(PyExc_TypeError, "keyword arguments are not supported");
   }
 
-  int num_inputs = PyTuple_GET_SIZE(args);
-  int num_inputs_required = ((THPCppFunction*)self)->cdata->num_inputs();
+  auto num_inputs = PyTuple_GET_SIZE(args);
+  auto num_inputs_required = ((THPCppFunction*)self)->cdata->num_inputs();
   if (num_inputs != num_inputs_required) {
     return PyErr_Format(
         PyExc_TypeError,
@@ -62,44 +61,51 @@ PyObject* THPCppFunction_call(
   }
   END_HANDLE_TH_ERRORS
 
-  int num_outputs = output.size();
+  auto num_outputs = output.size();
   if (num_outputs == 1) {
     // assume we want to unpack one element tuples for now
     return THPVariable_Wrap(output[0]);
   }
 
-  THPObjectPtr tuple(PyTuple_New(num_outputs));
-  for (int i = 0; i != num_outputs; ++i) {
+  THPObjectPtr tuple(PyTuple_New(static_cast<Py_ssize_t>(num_outputs)));
+  for (size_t i = 0; i != num_outputs; ++i) {
     PyTuple_SET_ITEM(tuple.get(), i, THPVariable_Wrap(output[i]));
   }
   return tuple.release();
 }
 
 int THPCppFunction_traverse(PyObject* self, visitproc visit, void* arg) {
-  auto& fn = *((THPCppFunction*)self)->cdata;
-  for (const auto& hook : fn.tensor_pre_hooks()) {
-    if (auto pyhook = dynamic_cast<PyFunctionTensorPreHook*>(hook.get())) {
-      Py_VISIT(pyhook->dict);
+  if ((((THPCppFunction*)self)->cdata).use_count() == 1) {
+    // The fields traversed below are owned by the cpp grad_fn, which we own a
+    // reference to. We should only them traverse however if we are the only
+    // owner of the grad_fn, otherwise we risk prematurely gc'ing the grad_fn.
+    //
+    // See: https://github.com/pytorch/pytorch/issues/102174
+    auto& fn = *((THPCppFunction*)self)->cdata;
+    for (const auto& hook : fn.tensor_pre_hooks()) {
+      if (auto pyhook = dynamic_cast<PyFunctionTensorPreHook*>(hook.get())) {
+        Py_VISIT(pyhook->dict);
+      }
     }
-  }
-  // NOTE [retains_grad_hook PyObject traversal]
-  // In theory this shouldn't be necessary, because retains_grad_hooks should
-  // not contain any PyFunctionTensorPreHooks. The alternative is to have a
-  // check that actually guarantees this.
-  for (const auto& pair : fn.retains_grad_hooks()) {
-    if (auto pyhook =
-            dynamic_cast<PyFunctionTensorPreHook*>(pair.second.get())) {
-      Py_VISIT(pyhook->dict);
+    // NOTE [retains_grad_hook PyObject traversal]
+    // In theory this shouldn't be necessary, because retains_grad_hooks should
+    // not contain any PyFunctionTensorPreHooks. The alternative is to have a
+    // check that actually guarantees this.
+    for (const auto& pair : fn.retains_grad_hooks()) {
+      if (auto pyhook =
+              dynamic_cast<PyFunctionTensorPreHook*>(pair.second.get())) {
+        Py_VISIT(pyhook->dict);
+      }
     }
-  }
-  for (const auto& hook : fn.pre_hooks()) {
-    if (auto pyhook = dynamic_cast<PyFunctionPreHook*>(hook.get())) {
-      Py_VISIT(pyhook->dict);
+    for (const auto& hook : fn.pre_hooks()) {
+      if (auto pyhook = dynamic_cast<PyFunctionPreHook*>(hook.get())) {
+        Py_VISIT(pyhook->dict);
+      }
     }
-  }
-  for (const auto& hook : fn.post_hooks()) {
-    if (auto pyhook = dynamic_cast<PyFunctionPostHook*>(hook.get())) {
-      Py_VISIT(pyhook->dict);
+    for (const auto& hook : fn.post_hooks()) {
+      if (auto pyhook = dynamic_cast<PyFunctionPostHook*>(hook.get())) {
+        Py_VISIT(pyhook->dict);
+      }
     }
   }
   return 0;
@@ -124,13 +130,14 @@ void THPCppFunction_dealloc(PyObject* self) {
 
 } // namespace
 
-PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook) {
-  const auto num_next = self->cdata->num_outputs();
+PyObject* THPCppFunction_next_functions(PyObject* self, void* _unused) {
+  auto cdata = reinterpret_cast<const THPCppFunction*>(self)->cdata;
+  const auto num_next = cdata->num_outputs();
   THPObjectPtr py_functions(PyTuple_New(num_next));
   if (!py_functions)
     return nullptr;
   for (const auto i : c10::irange(num_next)) {
-    auto& c_tuple = self->cdata->next_edge(i);
+    auto& c_tuple = cdata->next_edge(i);
     THPObjectPtr tuple(PyTuple_New(2));
     if (!tuple)
       return nullptr;
@@ -147,15 +154,17 @@ PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook) {
   return py_functions.release();
 }
 
-PyObject* THPCppFunction_metadata(THPCppFunction* self, void* _unused) {
+PyObject* THPCppFunction_metadata(PyObject* self, void* _unused) {
   auto* metadata =
-      static_cast<PyAnomalyMetadata*>(self->cdata->metadata())->dict();
+      static_cast<PyAnomalyMetadata*>(
+          reinterpret_cast<THPCppFunction*>(self)->cdata->metadata())
+          ->dict();
 
   Py_XINCREF(metadata);
   return metadata;
 }
 
-PyObject* THPCppFunction_requires_grad(THPCppFunction* self, void* unused) {
+PyObject* THPCppFunction_requires_grad(PyObject* self, void* unused) {
   Py_RETURN_TRUE;
 }
 
@@ -166,9 +175,8 @@ PyObject* THPCppFunction_register_hook_dict(PyObject* self, PyObject* _var) {
   }
   auto var = (THPVariable*)_var;
   auto& fn = *((THPCppFunction*)self)->cdata;
-  std::unique_ptr<FunctionPreHook> hook(new PyFunctionTensorPreHook(
+  fn.add_tensor_pre_hook(std::make_unique<PyFunctionTensorPreHook>(
       var->backward_hooks, THPVariable_Unpack(var).output_nr()));
-  fn.add_tensor_pre_hook(std::move(hook));
   Py_RETURN_NONE;
 }
 
@@ -187,6 +195,42 @@ PyObject* THPCppFunction_name(PyObject* self, PyObject* noargs) {
   return THPUtils_packString(fn.name());
 }
 
+PyObject* THPCppFunction_sequence_nr(PyObject* self, PyObject* noargs) {
+  auto& fn = *((THPCppFunction*)self)->cdata;
+  return THPUtils_packUInt64(fn.sequence_nr());
+}
+
+static PyObject* THPCppFunction_set_sequence_nr(
+    PyObject* self,
+    PyObject* sequence_nr) {
+  HANDLE_TH_ERRORS
+  auto& fn = *((THPCppFunction*)self)->cdata;
+  fn.set_sequence_nr(THPUtils_unpackUInt64(sequence_nr));
+  Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
+PyObject* THPCppFunction_input_metadata(PyObject* self, void* closure) {
+  HANDLE_TH_ERRORS;
+  auto& fn = *((THPCppFunction*)self)->cdata;
+  const auto num_inputs =
+      fn.num_inputs(); // Assuming there's a method to get the number of inputs
+  THPObjectPtr list(PyTuple_New(num_inputs));
+  if (!list) {
+    return nullptr;
+  }
+  for (size_t i = 0; i < num_inputs; ++i) {
+    const auto& metadata = fn.input_metadata(i);
+    THPObjectPtr item(py::cast(metadata).release().ptr());
+    if (!item) {
+      return nullptr;
+    }
+    PyTuple_SET_ITEM(list.get(), i, item.release());
+  }
+  return list.release();
+  END_HANDLE_TH_ERRORS
+}
+
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables,modernize-avoid-c-arrays)
 static struct PyMethodDef default_methods[] = {
     THP_FUNCTION_DEFAULT_METHODS,
@@ -202,6 +246,10 @@ PyTypeObject* _initFunctionPyTypeObject(
     const char* name,
     PyGetSetDef* function_properties,
     PyMethodDef* function_methods) {
+  type.ob_base = {
+    PyObject_HEAD_INIT(nullptr)
+      0};
+  // NOLINTNEXTLINE(misc-redundant-expression)
   type.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC;
   type.tp_name = name;
   type.tp_basicsize = sizeof(THPCppFunction);
@@ -225,15 +273,17 @@ static std::unordered_set<PyTypeObject*> cpp_function_types_set;
 struct DefaultFunctionType {
   DefaultFunctionType() : type() {
     _initFunctionPyTypeObject(type, "CppFunction", nullptr, nullptr);
-    Py_INCREF(&type);
   }
 
   PyTypeObject type;
 };
 
-PyObject* functionToPyObject(const std::shared_ptr<Node>& cdata) {
+static PyTypeObject* get_default_type() {
   static DefaultFunctionType default_type;
+  return &(default_type.type);
+}
 
+PyObject* functionToPyObject(const std::shared_ptr<Node>& cdata) {
   if (!cdata) {
     Py_RETURN_NONE;
   }
@@ -249,10 +299,9 @@ PyObject* functionToPyObject(const std::shared_ptr<Node>& cdata) {
   } else {
     auto& fn = *cdata;
     auto it = cpp_function_types_map.find(std::type_index(typeid(fn)));
-    // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-    PyTypeObject* type;
+    PyTypeObject* type = nullptr;
     if (it == cpp_function_types_map.end()) {
-      type = &default_type.type;
+      type = get_default_type();
     } else {
       type = (PyTypeObject*)it->second.get();
     }
@@ -279,6 +328,9 @@ void registerCppFunction(const std::type_info& type, PyTypeObject* pytype) {
 
 bool THPCppFunction_Check(PyObject* obj) {
   THPObjectPtr type = THPObjectPtr(PyObject_Type(obj));
+  if ((PyTypeObject*)type.get() == get_default_type()) {
+    return true;
+  }
   if (cpp_function_types_set.find((PyTypeObject*)type.get()) ==
       cpp_function_types_set.end()) {
     return false;
@@ -287,7 +339,7 @@ bool THPCppFunction_Check(PyObject* obj) {
   }
 }
 
-PyObject* callRegisterFn(PyObject* dict, PyObject* hook) {
+static PyObject* callRegisterFn(PyObject* dict, PyObject* hook) {
   THPObjectPtr register_fn(
       PyObject_GetAttrString(THPFunctionClass, "_register_hook"));
   if (!register_fn) {
@@ -315,8 +367,7 @@ PyObject* registerFunctionHook(Node& fn, PyObject* hook) {
   }
   if (dict == Py_None) {
     dict = PyTuple_GET_ITEM(res.get(), 0);
-    std::unique_ptr<FunctionPostHook> hook(new PyFunctionPostHook(dict));
-    fn.add_post_hook(std::move(hook));
+    fn.add_post_hook(std::make_unique<PyFunctionPostHook>(dict));
   }
 
   PyObject* handle = PyTuple_GET_ITEM(res.get(), 1);
@@ -339,8 +390,7 @@ PyObject* registerFunctionPreHook(Node& fn, PyObject* hook) {
   }
   if (dict == Py_None) {
     dict = PyTuple_GET_ITEM(res.get(), 0);
-    std::unique_ptr<FunctionPreHook> hook(new PyFunctionPreHook(dict));
-    fn.add_pre_hook(std::move(hook));
+    fn.add_pre_hook(std::make_unique<PyFunctionPreHook>(dict));
   }
 
   PyObject* handle = PyTuple_GET_ITEM(res.get(), 1);
@@ -348,5 +398,4 @@ PyObject* registerFunctionPreHook(Node& fn, PyObject* hook) {
   return handle;
 }
 
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd

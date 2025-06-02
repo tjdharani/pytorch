@@ -1,4 +1,5 @@
 #!/bin/bash
+set -x
 
 # shellcheck disable=SC2034
 # shellcheck source=./macos-common.sh
@@ -9,15 +10,16 @@ if [[ -n "$CONDA_ENV" ]]; then
   export PATH="$CONDA_ENV/bin":$PATH
 fi
 
-# Test that OpenMP is enabled for non-arm64 build
-if [[ ${BUILD_ENVIRONMENT} != *arm64* ]]; then
-  pushd test
-  if [[ ! $(python -c "import torch; print(int(torch.backends.openmp.is_available()))") == "1" ]]; then
-    echo "Build should have OpenMP enabled, but torch.backends.openmp.is_available() is False"
-    exit 1
-  fi
-  popd
+# Test that OpenMP is enabled
+pushd test
+if [[ ! $(python -c "import torch; print(int(torch.backends.openmp.is_available()))") == "1" ]]; then
+  echo "Build should have OpenMP enabled, but torch.backends.openmp.is_available() is False"
+  exit 1
 fi
+popd
+
+# enable debug asserts in serialization
+export TORCH_SERIALIZATION_DEBUG=1
 
 setup_test_python() {
   # The CircleCI worker hostname doesn't resolve to an address.
@@ -25,9 +27,11 @@ setup_test_python() {
   # using the address associated with the loopback interface.
   export GLOO_SOCKET_IFNAME=lo0
   echo "Ninja version: $(ninja --version)"
+  echo "Python version: $(which python) ($(python --version))"
 
-  # Increase default limit on open file handles from 256 to 1024
-  ulimit -n 1024
+  # Set the limit on open file handles to 16384
+  # might help with intermittent compiler test failures
+  ulimit -n 16384
 }
 
 test_python_all() {
@@ -37,6 +41,16 @@ test_python_all() {
 
   assert_git_not_dirty
 }
+
+test_python_mps() {
+  setup_test_python
+
+  time python test/run_test.py --verbose --mps
+  MTL_CAPTURE_ENABLED=1 ${CONDA_RUN} python3 test/test_mps.py --verbose -k test_metal_capture
+
+  assert_git_not_dirty
+}
+
 
 test_python_shard() {
   if [[ -z "$NUM_TEST_SHARDS" ]]; then
@@ -70,35 +84,17 @@ test_libtorch() {
     VERBOSE=1 DEBUG=1 python "$BUILD_LIBTORCH_PY"
     popd
 
-    python tools/download_mnist.py --quiet -d test/cpp/api/mnist
+    MNIST_DIR="${PWD}/test/cpp/api/mnist"
+    python tools/download_mnist.py --quiet -d "${MNIST_DIR}"
 
     # Unfortunately it seems like the test can't load from miniconda3
     # without these paths being set
     export DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$PWD/miniconda3/lib"
     export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD/miniconda3/lib"
-    TORCH_CPP_TEST_MNIST_PATH="test/cpp/api/mnist" "$CPP_BUILD"/caffe2/bin/test_api
+    TORCH_CPP_TEST_MNIST_PATH="${MNIST_DIR}" CPP_TESTS_DIR="${CPP_BUILD}/caffe2/bin" python test/run_test.py --cpp --verbose -i cpp/test_api
 
     assert_git_not_dirty
   fi
-}
-
-print_cmake_info() {
-  CMAKE_EXEC=$(which cmake)
-  echo "$CMAKE_EXEC"
-
-  CONDA_INSTALLATION_DIR=$(dirname "$CMAKE_EXEC")
-  # Print all libraries under cmake rpath for debugging
-  ls -la "$CONDA_INSTALLATION_DIR/../lib"
-
-  export CMAKE_EXEC
-  # Explicitly add conda env lib folder to cmake rpath to address the flaky issue
-  # where cmake dependencies couldn't be found. This seems to point to how conda
-  # links $CMAKE_EXEC to its package cache when cloning a new environment
-  install_name_tool -add_rpath @executable_path/../lib "${CMAKE_EXEC}" || true
-  # Adding the rpath will invalidate cmake signature, so signing it again here
-  # to trust the executable. EXC_BAD_ACCESS (SIGKILL (Code Signature Invalid))
-  # with an exit code 137 otherwise
-  codesign -f -s - "${CMAKE_EXEC}" || true
 }
 
 test_custom_backend() {
@@ -166,8 +162,178 @@ test_jit_hooks() {
   assert_git_not_dirty
 }
 
-if [[ "${TEST_CONFIG}" == *functorch* ]]; then
-  test_functorch
+torchbench_setup_macos() {
+  git clone --recursive https://github.com/pytorch/vision torchvision
+  git clone --recursive https://github.com/pytorch/audio torchaudio
+  brew install jpeg-turbo libpng
+
+  pushd torchvision
+  git fetch
+  git checkout "$(cat ../.github/ci_commit_pins/vision.txt)"
+  git submodule update --init --recursive
+  python setup.py clean
+  python setup.py develop
+  popd
+
+  pushd torchaudio
+  git fetch
+  git checkout "$(cat ../.github/ci_commit_pins/audio.txt)"
+  git submodule update --init --recursive
+  python setup.py clean
+  #TODO: Remove me, when figure out how to make TorchAudio find brew installed openmp
+  USE_OPENMP=0 python setup.py develop
+  popd
+
+  # Shellcheck doesn't like it when you pass no arguments to a function that can take args. See https://www.shellcheck.net/wiki/SC2120
+  # shellcheck disable=SC2119,SC2120
+  checkout_install_torchbench
+}
+
+pip_benchmark_deps() {
+  python -mpip install --no-input astunparse requests cython scikit-learn
+}
+
+
+test_torchbench_perf() {
+  print_cmake_info
+
+  echo "Launching torchbench setup"
+  pip_benchmark_deps
+  torchbench_setup_macos
+
+  TEST_REPORTS_DIR=$(pwd)/test/test-reports
+  mkdir -p "$TEST_REPORTS_DIR"
+
+  local backend=eager
+  local dtype=notset
+  local device=mps
+
+  echo "Setup complete, launching torchbench training performance run"
+  PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/torchbench.py \
+    --performance --backend "$backend" --training --devices "$device" \
+    --output "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_training_${device}_performance.csv"
+
+  echo "Launching torchbench inference performance run"
+  PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/torchbench.py \
+    --performance --backend "$backend" --inference --devices "$device" \
+    --output "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_inference_${device}_performance.csv"
+
+  echo "Pytorch benchmark on mps device completed"
+}
+
+test_torchbench_smoketest() {
+  print_cmake_info
+
+  echo "Launching torchbench setup"
+  pip_benchmark_deps
+  # shellcheck disable=SC2119,SC2120
+  torchbench_setup_macos
+
+  TEST_REPORTS_DIR=$(pwd)/test/test-reports
+  mkdir -p "$TEST_REPORTS_DIR"
+
+  local device=mps
+  local models=(hf_T5 llama BERT_pytorch dcgan hf_GPT2 yolov3 resnet152 sam pytorch_unet stable_diffusion_text_encoder speech_transformer Super_SloMo doctr_det_predictor doctr_reco_predictor)
+  local hf_models=(GoogleFnet YituTechConvBert Speech2Text2ForCausalLM)
+
+  for backend in eager inductor; do
+
+    for dtype in notset float16 bfloat16; do
+      echo "Launching torchbench inference performance run for backend ${backend} and dtype ${dtype}"
+      local dtype_arg="--${dtype}"
+      if [ "$dtype" == notset ]; then
+          dtype_arg="--float32"
+      fi
+      touch "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_inference_${device}_performance.csv"
+      for model in "${models[@]}"; do
+        PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/torchbench.py \
+          --performance --only "$model" --backend "$backend" --inference --devices "$device" "$dtype_arg" \
+          --output "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_inference_${device}_performance.csv" || true
+        if [ "$backend" == "inductor" ]; then
+          PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/torchbench.py \
+            --accuracy --only "$model" --backend "$backend" --inference --devices "$device" "$dtype_arg" \
+            --output "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_inference_${device}_accuracy.csv" || true
+        fi
+      done
+      for model in "${hf_models[@]}"; do
+        if [ "$backend" == "inductor" ]; then
+          PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/huggingface.py \
+            --performance --only "$model" --backend "$backend" --inference --devices "$device" "$dtype_arg" \
+            --output "$TEST_REPORTS_DIR/inductor_${backend}_huggingface_${dtype}_inference_${device}_performance.csv" || true
+          PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/huggingface.py \
+            --accuracy --only "$model" --backend "$backend" --inference --devices "$device" "$dtype_arg" \
+            --output "$TEST_REPORTS_DIR/inductor_${backend}_huggingface_${dtype}_inference_${device}_accuracy.csv" || true
+        fi
+      done
+    done
+
+    for dtype in notset amp; do
+      echo "Launching torchbench training performance run for backend ${backend} and dtype ${dtype}"
+      touch "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_training_${device}_performance.csv"
+      local dtype_arg="--${dtype}"
+      if [ "$dtype" == notset ]; then
+          dtype_arg="--float32"
+      fi
+      for model in "${models[@]}"; do
+        PYTHONPATH="$(pwd)"/torchbench python benchmarks/dynamo/torchbench.py \
+          --performance --only "$model" --backend "$backend" --training --devices "$device" "$dtype_arg" \
+          --output "$TEST_REPORTS_DIR/inductor_${backend}_torchbench_${dtype}_training_${device}_performance.csv" || true
+      done
+    done
+
+  done
+
+  echo "Pytorch benchmark on mps device completed"
+}
+
+test_hf_perf() {
+  print_cmake_info
+  TEST_REPORTS_DIR=$(pwd)/test/test-reports
+  mkdir -p "$TEST_REPORTS_DIR"
+  pip_benchmark_deps
+  torchbench_setup_macos
+
+  echo "Launching HuggingFace training perf run"
+  python "$(pwd)"/benchmarks/dynamo/huggingface.py --backend eager --device mps --performance --training --output="${TEST_REPORTS_DIR}"/hf_training.csv
+
+  echo "Launching HuggingFace inference perf run"
+  python "$(pwd)"/benchmarks/dynamo/huggingface.py --backend eager --device mps --performance --training --output="${TEST_REPORTS_DIR}"/hf_inference.csv
+
+  echo "HuggingFace benchmark on mps device completed"
+}
+
+test_timm_perf() {
+  print_cmake_info
+  TEST_REPORTS_DIR=$(pwd)/test/test-reports
+  mkdir -p "$TEST_REPORTS_DIR"
+  pip_benchmark_deps
+  torchbench_setup_macos
+
+  echo "Launching timm training perf run"
+  python "$(pwd)"/benchmarks/dynamo/timm_models.py --backend eager --device mps --performance --training --output="${TEST_REPORTS_DIR}"/timm_training.csv
+
+  echo "Launching timm inference perf run"
+  python "$(pwd)"/benchmarks/dynamo/timm_models.py --backend eager --device mps --performance --training --output="${TEST_REPORTS_DIR}"/timm_inference.csv
+
+  echo "timm benchmark on mps device completed"
+}
+
+install_tlparse
+
+if [[ $TEST_CONFIG == *"perf_all"* ]]; then
+  test_torchbench_perf
+  test_hf_perf
+  test_timm_perf
+elif [[ $TEST_CONFIG == *"perf_torchbench"* ]]; then
+  test_torchbench_perf
+elif [[ $TEST_CONFIG == *"perf_hf"* ]]; then
+  test_hf_perf
+elif [[ $TEST_CONFIG == *"perf_timm"* ]]; then
+  test_timm_perf
+elif [[ $TEST_CONFIG == *"perf_smoketest"* ]]; then
+  test_torchbench_smoketest
+elif [[ $TEST_CONFIG == *"mps"* ]]; then
+  test_python_mps
 elif [[ $NUM_TEST_SHARDS -gt 1 ]]; then
   test_python_shard "${SHARD_NUMBER}"
   if [[ "${SHARD_NUMBER}" == 1 ]]; then

@@ -202,7 +202,7 @@ register submodules from a list or dict:
      def forward(self, x, act):
        for linear in self.linears:
          x = linear(x)
-       x = self.activations[act](x)
+         x = self.activations[act](x)
        x = self.final(x)
        return x
 
@@ -534,7 +534,7 @@ The following class demonstrates the various ways of registering parameters and 
 For more information, check out:
 
 * Saving and loading: https://pytorch.org/tutorials/beginner/saving_loading_models.html
-* Serialization semantics: https://pytorch.org/docs/master/notes/serialization.html
+* Serialization semantics: https://pytorch.org/docs/main/notes/serialization.html
 * What is a state dict? https://pytorch.org/tutorials/recipes/recipes/what_is_state_dict.html
 
 Module Initialization

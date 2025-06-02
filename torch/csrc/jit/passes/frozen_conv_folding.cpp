@@ -21,8 +21,7 @@
 #include <ATen/ops/zeros_like.h>
 #endif
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 
@@ -66,7 +65,7 @@ bool FoldFrozenConvBatchnorm(Block* b) {
       auto bn_rm_ivalue = bn->namedInput("running_mean");
       auto bn_rv_ivalue = bn->namedInput("running_var");
       // check running_mean and running_var has value, if they are
-      // None(track_running_stats=False), skiping the folding path.
+      // None(track_running_stats=False), skipping the folding path.
       if (bn_rm_ivalue->type() == NoneType::get() &&
           bn_rv_ivalue->type() == NoneType::get()) {
         continue;
@@ -191,7 +190,7 @@ bool checkConvAndBroadcastingOpPreConditions(Node* conv, Node* op) {
       constant_as<Tensor>(conv->namedInput("weight")).value();
 
   // avoid fusing op that causes type promotion
-  // resticting to float avoids int/float difficulties with scalar overload
+  // restricting to float avoids int/float difficulties with scalar overload
   if (!weight_tensor.is_floating_point()) {
     return false;
   }
@@ -328,8 +327,8 @@ bool FoldFrozenConvMulOrDiv(Block* b) {
       // channels-out resize it to the shape that will broadcast to
       // weight_tensor when the op is run so we dont change weight size
       std::vector<int64_t> weight_compatible_size = {out_channels};
-      for (const auto i : c10::irange(1, weight_tensor.ndimension())) {
-        (void)i; // Suppress unused variable warning
+      for ([[maybe_unused]] const auto i :
+           c10::irange(1, weight_tensor.ndimension())) {
         weight_compatible_size.push_back(1);
       }
 
@@ -408,5 +407,4 @@ bool FoldFrozenConvMulOrDiv(std::shared_ptr<Graph>& graph) {
   return graph_modified;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

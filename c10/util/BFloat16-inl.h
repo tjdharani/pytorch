@@ -1,6 +1,8 @@
 #pragma once
 
 #include <c10/macros/Macros.h>
+#include <c10/util/bit_cast.h>
+
 #include <limits>
 
 C10_CLANG_DIAGNOSTIC_PUSH()
@@ -8,13 +10,10 @@ C10_CLANG_DIAGNOSTIC_PUSH()
 C10_CLANG_DIAGNOSTIC_IGNORE("-Wimplicit-int-float-conversion")
 #endif
 
-#if defined(SYCL_EXT_ONEAPI_BFLOAT16_MATH_FUNCTIONS)
 #if defined(CL_SYCL_LANGUAGE_VERSION)
 #include <CL/sycl.hpp> // for SYCL 1.2.1
-#else
+#elif defined(SYCL_LANGUAGE_VERSION)
 #include <sycl/sycl.hpp> // for SYCL 2020
-#endif
-#include <ext/oneapi/bfloat16.hpp>
 #endif
 
 namespace c10 {
@@ -27,7 +26,7 @@ inline C10_HOST_DEVICE BFloat16::BFloat16(float value)
       x(__bfloat16_as_ushort(__float2bfloat16(value)))
 #elif defined(__SYCL_DEVICE_ONLY__) && \
     defined(SYCL_EXT_ONEAPI_BFLOAT16_MATH_FUNCTIONS)
-      x(sycl::bit_cast<uint16_t>(sycl::ext::oneapi::bfloat16(value)))
+      x(c10::bit_cast<uint16_t>(sycl::ext::oneapi::bfloat16(value)))
 #else
       // RNE by default
       x(detail::round_to_nearest_even(value))

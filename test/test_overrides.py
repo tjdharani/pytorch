@@ -1,5 +1,6 @@
 # Owner(s): ["module: __torch_function__"]
 
+import sys
 import torch
 import numpy as np
 import inspect
@@ -8,22 +9,34 @@ import pprint
 import pickle
 import collections
 import unittest
+import os
 
 from torch.testing._internal.common_utils import TestCase, run_tests, TEST_WITH_CROSSREF
 from torch.overrides import (
     handle_torch_function,
     has_torch_function,
+    get_ignored_functions,
     get_overridable_functions,
     get_testing_overrides,
+    resolve_name,
     is_tensor_method_or_property,
     TorchFunctionMode,
     _get_current_function_mode,
     _get_current_function_mode_stack,
+    BaseTorchFunctionMode
 )
 from torch.utils._mode_utils import all_same_mode
 from torch.utils._pytree import tree_map
 
 Tensor = torch.Tensor
+
+if os.getenv("ATEN_CPU_CAPABILITY") in ("default", "avx2"):
+    # This test is not supported on ARM
+    print(
+        "Skipping due to failing when cuda build runs on non cuda machine, "
+        + "see https://github.com/pytorch/pytorch/pull/150059 for example"
+    )
+    sys.exit()
 
 # The functions below simulate the pure-python torch functions in the
 # torch.functional namespace. We use examples local to this file rather
@@ -129,7 +142,7 @@ class DiagonalTensor:
         self._i = value
 
     def __repr__(self):
-        return "DiagonalTensor(N={}, value={})".format(self._N, self._i)
+        return f"DiagonalTensor(N={self._N}, value={self._i})"
 
     def __array__(self):
         return self._i * np.eye(self._N)
@@ -146,13 +159,7 @@ class DiagonalTensor:
         return cls.handled_functions[func](*args, **kwargs)
 
     def __eq__(self, other):
-        if type(other) is type(self):
-            if self._N == other._N and self._i == other._i:
-                return True
-            else:
-                return False
-        else:
-            return False
+        return type(other) is type(self) and self._N == other._N and self._i == other._i
 
 @implements_diagonal(torch.mean)
 def mean(mat):
@@ -215,7 +222,7 @@ class SubTensor(torch.Tensor):
     """
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if(kwargs is None):
+        if kwargs is None:
             kwargs = {}
 
         if func not in HANDLED_FUNCTIONS_SUB:
@@ -271,7 +278,7 @@ class SubDiagonalTensor(DiagonalTensor):
     handled_functions = HANDLED_FUNCTIONS_SUB_DIAGONAL
 
     def __repr__(self):
-        return "SubDiagonalTensor(N={}, value={})".format(self._N, self._i)
+        return f"SubDiagonalTensor(N={self._N}, value={self._i})"
 
 
 @implements_sub_diagonal(torch.mean)
@@ -323,7 +330,6 @@ def implements_tensor_like(torch_function):
     return decorator
 
 def generate_tensor_like_torch_implementations():
-    torch_vars = vars(torch)
     untested_funcs = []
     testing_overrides = get_testing_overrides()
     # test/test_cpp_api_parity.py monkeypatches torch.nn to have a new
@@ -332,11 +338,11 @@ def generate_tensor_like_torch_implementations():
     # the problem.  A more proper fix is to make the "not tested" check
     # a test on its own, and to make sure the monkeypatch is only installed
     # for the span of the relevant test (and deleted afterwards)
-    testing_ignore = {"sample_functional"}
+    testing_ignore = {"sample_functional", "autocast"}
     for namespace, funcs in get_overridable_functions().items():
         for func in funcs:
             if func not in testing_overrides and func.__name__ not in testing_ignore:
-                untested_funcs.append("{}.{}".format(namespace, func.__name__))
+                untested_funcs.append(f"{namespace}.{func.__name__}")
     msg = (
         "The following functions are not tested for __torch_function__ "
         "support, please ensure there is an entry in the dict returned by "
@@ -366,7 +372,7 @@ class TensorLike:
     """
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if(kwargs is None):
+        if kwargs is None:
             kwargs = {}
 
         if func not in HANDLED_FUNCTIONS_TENSOR_LIKE:
@@ -375,8 +381,15 @@ class TensorLike:
         return HANDLED_FUNCTIONS_TENSOR_LIKE[func](*args, **kwargs)
 
 class TestTorchFunctionOverride(TestCase):
+    def test_dtype_override(self):
+        class MyDtype:
+            def __torch_function__(self, *args, **kwargs):
+                return 4
+
+        self.assertEqual(torch.empty(4).view(MyDtype()), 4)
+
     def test_mean_semantics(self):
-        """Test that a function with one argument can be overrided"""
+        """Test that a function with one argument can be overridden"""
         t1 = DiagonalTensor(5, 2)
         t2 = SubTensor([[1, 2], [1, 2]])
         t3 = SubDiagonalTensor(5, 2)
@@ -392,7 +405,7 @@ class TestTorchFunctionOverride(TestCase):
             has_torch_function(object())
 
     def test_mm_semantics(self):
-        """Test that a function with multiple arguments can be overrided"""
+        """Test that a function with multiple arguments can be overridden"""
         t1 = DiagonalTensor(5, 2)
         t2 = torch.eye(5) * 2
         t3 = SubTensor([[1, 2], [1, 2]])
@@ -629,53 +642,68 @@ def generate_tensor_like_override_tests(cls):
 
         func_args = []
         is_method = is_tensor_method_or_property(func)
-        if func in annotated_args:
+
+        def _simple_type_parser(func, arg_name, arg_type):
+            # Guess valid input to aten function based on type of argument
+            if arg_type == "Tensor":
+                return instance_gen()
+            elif arg_type == "TensorList" or arg_type == "ITensorListRef":
+                return [instance_gen(), instance_gen()]
+            elif arg_type == "c10::List<::std::optional<Tensor>>":
+                return [instance_gen(), instance_gen()]
+            elif arg_type == "IntArrayRef" or arg_type == "SymIntArrayRef":
+                size = arg.get("size", 2)
+                if size == 1:
+                    return 1
+                else:
+                    return [1] * size
+            elif arg_type == "Scalar":
+                return 3.5
+            elif arg_type == "bool":
+                return False
+            elif arg_type == "Dimname":
+                return ""
+            elif arg_type == "DimnameList":
+                return [""]
+            elif arg_type.startswith("int"):
+                return 0
+            elif arg_type in {"Stream"}:
+                return torch.Stream()
+            elif arg_type.startswith("float") or arg_type == "double":
+                return 1.0
+            elif arg_type in {"Generator", "MemoryFormat", "TensorOptions"}:
+                return None
+            elif arg_type == "ScalarType":
+                return torch.float32
+            elif arg_type == "c10::string_view":
+                return ""
+            elif arg_type in ("std::string_view", "::std::string_view"):
+                return ""
+            elif arg_type == "SymInt":
+                # TODO: generate actual SymbolicInt
+                return 1
+            else:
+                raise RuntimeError(
+                    f"Unsupported argument type {arg_type} for {arg_name} of function {func}"
+                )
+
+        # Special case; this doesn't have a schema but takes a list
+        if func is torch.sym_sum:
+            func_args.append([TensorLike(), TensorLike()])
+        elif func in annotated_args:
             for arg in annotated_args[func]:
                 # Guess valid input to aten function based on type of argument
-                t = arg['simple_type']
-                if t.endswith('?'):
-                    t = t[:-1]
-                if t == 'Tensor':
-                    if is_method and arg['name'] == 'self':
-                        # See "Note: properties and __get__"
-                        func = func.__get__(instance_gen())
-                        continue
-                    func_args.append(instance_gen())
-                elif t == 'TensorList' or t == 'ITensorListRef':
-                    func_args.append([instance_gen(), instance_gen()])
-                elif t == 'c10::List<c10::optional<Tensor>>':
-                    func_args.append([instance_gen(), instance_gen()])
-                elif t == 'IntArrayRef' or t == 'SymIntArrayRef':
-                    size = arg.get('size', 2)
-                    if size == 1:
-                        func_args.append(1)
-                    else:
-                        func_args.append([1] * size)
-                elif t == 'Scalar':
-                    func_args.append(3.5)
-                elif t == 'bool':
-                    func_args.append(False)
-                elif t == 'Dimname':
-                    func_args.append("")
-                elif t == 'DimnameList':
-                    func_args.append([""])
-                elif t.startswith('int'):
-                    func_args.append(0)
-                elif t in {'Stream'}:
-                    func_args.append(torch.Stream())
-                elif t.startswith('float') or t == 'double':
-                    func_args.append(1.0)
-                elif t in {'Generator', 'MemoryFormat', 'TensorOptions'}:
-                    func_args.append(None)
-                elif t == 'ScalarType':
-                    func_args.append(torch.float32)
-                elif t == 'c10::string_view':
-                    func_args.append('')
-                elif t == 'SymInt':
-                    # TODO: generate actual SymbolicInt
-                    func_args.append(1)
+                t = arg["simple_type"]
+                t = t.removesuffix("?")
+                if t == "Tensor" and is_method and arg["name"] == "self":
+                    # See "Note: properties and __get__"
+                    func = func.__get__(instance_gen())
+                    continue
+                arg_to_add = _simple_type_parser(func, arg["name"], t)
+                if "is_kwarg_only" in arg and arg["is_kwarg_only"] == str(True):
+                    kwargs[arg["name"]] = arg_to_add
                 else:
-                    raise RuntimeError(f"Unsupported argument type {t} for {arg['name']} of function {func}")
+                    func_args.append(arg_to_add)
         else:
             args = inspect.getfullargspec(override)
             try:
@@ -739,7 +767,7 @@ def generate_tensor_like_override_tests(cls):
         if module:
             name = 'test_{}_{}'.format(module.replace('.', '_'), func.__name__)
         else:
-            name = 'test_{}'.format(func.__name__)
+            name = f'test_{func.__name__}'
         test_method.__name__ = name
         setattr(cls, name, test_method)
 
@@ -906,7 +934,6 @@ class TestGradCheckOverride(TestCase):
                 'numel',
                 'requires_grad',
                 'requires_grad_',
-                'retain_grad',
                 'size',
                 'stride',
             }
@@ -920,7 +947,6 @@ class TestGradCheckOverride(TestCase):
                 torch.Tensor.size,
                 torch.Tensor.is_floating_point,
                 torch.Tensor.numel,
-                torch.Tensor.retain_grad,
                 torch.Tensor.stride,
                 torch.Tensor.requires_grad_,
                 torch.autograd.grad,
@@ -1085,7 +1111,7 @@ class TestRNN(TestCase):
 class TestDisabledTorchFunction(TestCase):
     # Regression test for gh-64687
     def test_parameter_does_not_prevent_dispatch(self):
-        class MyTensor():
+        class MyTensor:
             @classmethod
             def __torch_function__(cls, func, types, args=(), kwargs=None):
                 return "called"
@@ -1109,24 +1135,37 @@ class TestResolveName(TestCase):
                 )
 
 class TestTorchFunctionWarning(TestCase):
-    def test_warn_on_invalid_torch_function(self):
-        class Bad1():
+    def test_warn_on_invalid_torch_function_standalone_class(self):
+        class StandaloneTorchFunctionClass:
             def __torch_function__(self, *args, **kwargs):
                 pass
+        a = StandaloneTorchFunctionClass()
+        with self.assertWarnsRegex(DeprecationWarning, "as a plain method is deprecated"):
+            # Function that handles torch_function on the python side
+            torch.nn.functional.dropout(a)
+        with self.assertWarnsRegex(UserWarning, "as a plain method is deprecated"):
+            # Function that handles torch_function in C++
+            torch.abs(a)
 
-        class Bad2(torch.Tensor):
+    def test_warn_on_invalid_torch_function_tensor_subclass(self):
+        class TensorSubclassTorchFunctionClass(torch.Tensor):
             def __torch_function__(self, *args, **kwargs):
                 pass
+        b = TensorSubclassTorchFunctionClass()
+        with self.assertWarnsRegex(DeprecationWarning, "as a plain method is deprecated"):
+            # Function that handles torch_function on the python side
+            torch.nn.functional.dropout(b)
+        with self.assertWarnsRegex(UserWarning, "as a plain method is deprecated"):
+            # Function that handles torch_function in C++
+            torch.abs(b)
 
-        a = Bad1()
-        for a in (Bad1(), Bad2()):
-            with self.assertWarnsRegex(DeprecationWarning, "as a plain method is deprecated"):
-                # Function that handles torch_function on the python side
-                torch.nn.functional.dropout(a)
-
-            with self.assertWarnsRegex(UserWarning, "as a plain method is deprecated"):
-                # Function that handles torch_function in C++
-                torch.abs(a)
+class TestDisabledUserWarnings(TestCase):
+    def test_no_implicit_user_warning_for_deprecated_functions(self):
+        self.assertNotWarn(get_ignored_functions)
+        self.assertNotWarn(get_testing_overrides)
+        self.assertNotWarn(get_overridable_functions)
+        self.assertNotWarn(lambda: resolve_name(torch.Tensor.add))
+        self.assertNotWarn(lambda: is_tensor_method_or_property(torch.Tensor.add))
 
 @unittest.skipIf(TEST_WITH_CROSSREF, "not run with crossref")
 class TestTorchFunctionMode(TestCase):
@@ -1187,7 +1226,7 @@ class TestTorchFunctionMode(TestCase):
 
         class A(TorchFunctionMode):
             def __torch_function__(self, *args, **kwargs):
-                raise ErrorA()
+                raise ErrorA
 
         with self.assertRaises(ErrorA):
             with A():
@@ -1199,7 +1238,7 @@ class TestTorchFunctionMode(TestCase):
 
         class A(TorchFunctionMode):
             def __torch_function__(self, *args, **kwargs):
-                raise ErrorA()
+                raise ErrorA
 
         x = A()
         with self.assertRaises(ErrorA):
@@ -1368,6 +1407,28 @@ class TestTorchFunctionMode(TestCase):
 
         self.assertTrue(called)
 
+    def test_getitem_call(self):
+        # This failed because the parser thinks the function is called to()
+        # but it's actually called _parse_to()
+
+        called = False
+
+        class A(TorchFunctionMode):
+            def __torch_function__(self, func, types, args=(), kwargs=None):
+                nonlocal called
+                if kwargs is None:
+                    kwargs = {}
+                called = True
+                return func(*args, **kwargs)
+
+        a = torch.zeros(5)
+        b = torch.tensor(0)
+        with A():
+            a[b]
+
+        self.assertTrue(called)
+
+
     def test_distributions_bernoulli(self):
         # This failed because improper use of has_torch_function when
         # is_tensor_like should have been used instead, inside the
@@ -1474,8 +1535,6 @@ class TestTorchFunctionMode(TestCase):
         self.assertFalse(called)
 
     def test_disable_enable_subclass(self):
-        called = False
-
         class A(torch.Tensor):
             pass
 
@@ -1486,6 +1545,33 @@ class TestTorchFunctionMode(TestCase):
                 self.assertIsInstance(torch.sum(x), A)
             finally:
                 del g
+
+    def test_disable_enable_torch_function_ctx(self):
+        class A(torch.Tensor):
+            pass
+
+        x = A(torch.randn(5))
+        with torch._C.DisableTorchFunction():
+            with torch.overrides._enable_torch_function():
+                self.assertIsInstance(torch.sum(x), A)
+
+    def test_torch_function_all_disabled_api(self):
+        from torch._C import _is_torch_function_all_disabled
+
+        state = _is_torch_function_all_disabled()
+        self.assertFalse(state)
+
+        with torch._C.DisableTorchFunction():
+            state = _is_torch_function_all_disabled()
+            self.assertTrue(state)
+
+        state = _is_torch_function_all_disabled()
+        self.assertFalse(state)
+
+        with torch._C.DisableTorchFunctionSubclass():
+            state = _is_torch_function_all_disabled()
+            self.assertFalse(state)
+
 
     def test_subclass_hash(self):
         class DiagTensor(torch.Tensor):
@@ -1517,6 +1603,51 @@ class TestTorchFunctionMode(TestCase):
         s = set()
         s.add(a)
         s.add(DiagTensor(d))
+
+    def test_custom_device_type(self):
+        class CustomDeviceContext(TorchFunctionMode):
+
+            def __torch_function__(self, func, types, args=(), kwargs=None):
+                kwargs = kwargs or {}
+                if func == torch.device:
+                    if args and isinstance(args[0], int):
+                        args = ("xla", args[0])
+                    elif isinstance(kwargs.get('device'), int):
+                        kwargs['device'] = f"xla:{kwargs.get('device')}"
+                return func(*args, **kwargs)
+
+        with CustomDeviceContext():
+            d_args = torch.device(0)
+            self.assertEqual(d_args.type, "xla")
+            self.assertEqual(d_args.index, 0)
+            d_kwargs = torch.device(device=0)
+            self.assertEqual(d_kwargs.type, "xla")
+            self.assertEqual(d_kwargs.index, 0)
+
+    def test_device_context_semantics(self):
+        from torch._C import _len_torch_function_stack
+        from torch.utils._device import DeviceContext
+        try:
+            torch.set_default_device("cuda")
+
+            def get_stack():
+                return [torch._C._get_function_stack_at(i) for i in range(_len_torch_function_stack())]
+
+            base_mode = BaseTorchFunctionMode()
+            with base_mode:
+                torch.set_default_device("cpu")
+                stack = get_stack()
+                self.assertIsInstance(stack[0], DeviceContext)
+                self.assertEqual(stack[0].device, torch.device("cpu"))
+
+            stack = get_stack()
+            self.assertIsInstance(stack[0], DeviceContext)
+            self.assertEqual(stack[0].device, torch.device("cpu"))
+        finally:
+            torch.set_default_device(None)
+
+
+
 
 
 if __name__ == '__main__':

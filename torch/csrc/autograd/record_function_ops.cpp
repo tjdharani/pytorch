@@ -9,18 +9,16 @@
 namespace caffe2 {
 // Required for cpp_custom_type_hack to work
 // NOLINTNEXTLINE(bugprone-exception-escape)
-CAFFE_KNOWN_TYPE(at::RecordFunction);
+CAFFE_KNOWN_TYPE(at::RecordFunction)
 } // namespace caffe2
 
-namespace torch {
-namespace autograd {
-namespace profiler {
+namespace torch::autograd::profiler {
 
 // Creates a new profiling scope using RecordFunction and invokes its starting
 // callbacks.
-void record_function_enter(
+static void record_function_enter(
     const std::string& name,
-    const c10::optional<std::string>& args,
+    const std::optional<std::string>& args,
     at::RecordFunction& rec) {
   if (rec.isActive()) {
     if (rec.needsInputs() && args.has_value()) {
@@ -33,9 +31,9 @@ void record_function_enter(
 }
 
 // Legacy signature using cpp_custom_type_hack
-at::Tensor record_function_enter_legacy(
+static at::Tensor record_function_enter_legacy(
     const std::string& name,
-    const c10::optional<std::string>& args) {
+    const std::optional<std::string>& args) {
   auto rec = std::make_unique<at::RecordFunction>(at::RecordScope::USER_SCOPE);
   record_function_enter(name, args, *rec);
   return at::cpp_custom_type_hack::create(std::move(rec), at::TensorOptions());
@@ -44,25 +42,26 @@ at::Tensor record_function_enter_legacy(
 // New signature using custom_class
 c10::intrusive_ptr<PythonRecordFunction> record_function_enter_new(
     const std::string& name,
-    const c10::optional<std::string>& args) {
+    const std::optional<std::string>& args) {
   auto rec =
       c10::make_intrusive<PythonRecordFunction>(at::RecordScope::USER_SCOPE);
   record_function_enter(name, args, rec->record);
   return rec;
 }
 
-at::RecordFunction& getRecordFunctionFromTensor(const at::Tensor& handle) {
+static at::RecordFunction& getRecordFunctionFromTensor(
+    const at::Tensor& handle) {
   auto& rec = at::cpp_custom_type_hack::cast<at::RecordFunction>(handle);
   return rec;
 }
 
 // Ends the profiling scope created with record_function_enter.
-void record_function_exit(at::RecordFunction& rec) {
+static void record_function_exit(at::RecordFunction& rec) {
   rec.end();
 }
 
 // Legacy signature using cpp_custom_type_hack
-void record_function_exit_legacy(const at::Tensor& handle) {
+static void record_function_exit_legacy(const at::Tensor& handle) {
   // We don't actually need to do anything with handle just need to persist the
   // lifetime until now.
   auto& rec = getRecordFunctionFromTensor(handle);
@@ -70,18 +69,18 @@ void record_function_exit_legacy(const at::Tensor& handle) {
 }
 
 // New signature using custom_class
-void record_function_exit_new(
+static void record_function_exit_new(
     const c10::intrusive_ptr<PythonRecordFunction>& record) {
   record_function_exit(record->record);
 }
 
 template <typename Func>
-c10::intrusive_ptr<c10::ivalue::Future> _call_end_callbacks_on_fut(
+static c10::intrusive_ptr<c10::ivalue::Future> _call_end_callbacks_on_fut(
     Func get_record,
     const c10::intrusive_ptr<c10::ivalue::Future>& fut) {
   // Profiling callback that ends the associated record_function
   // and returns the value of the passed in future.
-  std::function<c10::IValue(c10::ivalue::Future&)> futureProfilingFunc =
+  auto futureProfilingFunc =
       [get_record = std::move(get_record)](c10::ivalue::Future& fut) {
         auto& rec = get_record();
         rec.end();
@@ -100,7 +99,7 @@ c10::intrusive_ptr<c10::ivalue::Future> _call_end_callbacks_on_fut(
 }
 
 // Legacy signature using cpp_custom_type_hack
-c10::intrusive_ptr<c10::ivalue::Future> _call_end_callbacks_on_fut_legacy(
+static c10::intrusive_ptr<c10::ivalue::Future> _call_end_callbacks_on_fut_legacy(
     const at::Tensor& handle,
     const c10::intrusive_ptr<c10::ivalue::Future>& fut) {
   return _call_end_callbacks_on_fut(
@@ -164,6 +163,4 @@ TORCH_LIBRARY_FRAGMENT(profiler, m) {
       c10::AliasAnalysisKind::FROM_SCHEMA));
 }
 
-} // namespace profiler
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd::profiler

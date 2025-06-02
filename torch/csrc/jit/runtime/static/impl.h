@@ -5,7 +5,6 @@
 #include <c10/macros/Macros.h>
 #include <c10/util/ArrayRef.h>
 #include <c10/util/FbcodeMaps.h>
-#include <c10/util/variant.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/csrc/jit/ir/graph_node_list.h>
 #include <torch/csrc/jit/ir/ir.h>
@@ -21,8 +20,7 @@
 #include <folly/container/F14Set.h>
 #endif
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 TORCH_API bool canEnableStaticRuntime(
     const std::shared_ptr<torch::jit::Graph>& graph);
@@ -139,6 +137,8 @@ class TORCH_API ManagedTensorRanges {
   // type are mutable)
   std::vector<const Value*> collectValuesWithTrackedLifetimes(
       at::ArrayRef<const Value*> values);
+  void extendLifetime(Value* input, size_t new_end);
+  void extendInputLifetime(Node* node, size_t new_end);
 
   // Maps Node* to the set of managed tensors that are now available
   // for re-use after this node.
@@ -242,11 +242,59 @@ class TORCH_API StaticRuntimeMetadata : public torch::CustomClassHolder {
 ///
 class MemoryPlanner;
 class StaticNodeInfo;
-class ProcessedFunction;
 class ProcessedNode;
 class StaticRuntime;
 
 using SROperator = std::function<void(ProcessedNode*)>;
+
+#ifdef FBCODE_CAFFE2
+struct TORCH_API SROperatorObserver {
+  using OperatorCallback = void (*)(const Node*);
+  OperatorCallback startCb = nullptr;
+  OperatorCallback endCb = nullptr;
+
+  static void setCurrentThreadObserver(SROperatorObserver* observer);
+  static SROperatorObserver* getCurrentThreadObserver();
+  static void onStart(const Node* name);
+  static void onEnd(const Node* name);
+};
+#endif
+
+class TORCH_API ProcessedFunction {
+ public:
+  ProcessedFunction(
+      Node* node,
+      bool enable_out_variant,
+      bool check_memory_overlap);
+
+  enum class Kind : uint8_t {
+    kOutVariant,
+    kNativeFunction,
+    kInterpreterFallback,
+  };
+
+  void run(ProcessedNode* pnode) const {
+    return f_(pnode);
+  }
+
+  Kind kind() const {
+    return kind_;
+  }
+
+  bool checkMemoryOverlap() const {
+    return check_memory_overlap_;
+  }
+
+  size_t num_outputs() const {
+    return num_outputs_;
+  }
+
+ private:
+  SROperator f_;
+  Kind kind_{ProcessedFunction::Kind::kOutVariant};
+  bool check_memory_overlap_{false};
+  size_t num_outputs_{0};
+};
 
 // A `BlockInfo` instance stores all of the shared state that each
 // `BlockRunner` will need to access. Most of this information is
@@ -260,8 +308,7 @@ using SROperator = std::function<void(ProcessedNode*)>;
 //   planner.
 class BlockInfo {
  public:
-  BlockInfo(uint32_t input_idx, Block& block)
-      : input_idx_(input_idx), block_(block) {}
+  BlockInfo(uint32_t input_idx, Block& block);
 
   void set_nodes(
       std::vector<StaticNodeInfo> nodes,
@@ -271,9 +318,7 @@ class BlockInfo {
     return nodes_;
   }
 
-  size_t num_nodes() const {
-    return nodes_.size();
-  }
+  size_t num_nodes() const;
 
   size_t num_inputs() const {
     return block_.inputs().size();
@@ -362,7 +407,7 @@ class BlockInfo {
 class TORCH_API StaticModule {
  public:
   explicit StaticModule(
-      std::shared_ptr<torch::jit::Graph> g,
+      const std::shared_ptr<torch::jit::Graph>& g,
       const StaticModuleOptions& opts = StaticModuleOptions(),
       std::vector<IValue> sample_inputs = {});
 
@@ -374,7 +419,7 @@ class TORCH_API StaticModule {
 
  private:
   explicit StaticModule(
-      std::pair<std::shared_ptr<torch::jit::Graph>, c10::optional<Module>>
+      std::pair<std::shared_ptr<torch::jit::Graph>, std::optional<Module>>
           graph_and_module,
       const StaticModuleOptions& opts);
 
@@ -413,7 +458,7 @@ class TORCH_API StaticModule {
     return num_inputs() + num_constants() + num_intermediate_values();
   }
 
-  C10_NODISCARD const std::vector<uint16_t>& output_indices() const {
+  [[nodiscard]] const std::vector<uint16_t>& output_indices() const {
     return output_indices_;
   }
 
@@ -445,9 +490,9 @@ class TORCH_API StaticModule {
         });
   }
 
-  C10_NODISCARD Node* findNodeWithKindForTesting(const std::string& kind) const;
+  [[nodiscard]] Node* findNodeWithKindForTesting(const std::string& kind) const;
 
-  const c10::optional<c10::FunctionSchema>& schema() const {
+  const std::optional<c10::FunctionSchema>& schema() const {
     return schema_;
   }
 
@@ -496,8 +541,8 @@ class TORCH_API StaticModule {
   // metadata that is stored in IR nodes as attribute
   at::intrusive_ptr<jit::StaticRuntimeMetadata> sr_metadata_;
   std::shared_ptr<torch::jit::Graph> graph_;
-  c10::optional<torch::jit::Module> module_;
-  c10::optional<c10::FunctionSchema> schema_;
+  std::optional<torch::jit::Module> module_;
+  std::optional<c10::FunctionSchema> schema_;
   std::unique_ptr<StaticRuntime> cached_runtime_;
 
   // Bookkeeping for creating new StaticRuntime instances
@@ -513,7 +558,7 @@ class TORCH_API StaticModule {
 
   size_t num_intermediate_values_ = 0;
 
-  // Includes self if module_ != nullopt.
+  // Includes self if module_ != std::nullopt.
   // Note that we might have num_inputs_ == 0 even if the schema has a `self`
   // argument. In this case, `self` isn't used in the graph, but the schema
   // includes it anyways to be consistent with the JIT interpreter.
@@ -601,7 +646,7 @@ class TORCH_API BlockRunner {
   }
 
   // Output is readonly. The writing process happens inside ProcessedNodes
-  C10_NODISCARD const IValue& Output(uint32_t i) const {
+  [[nodiscard]] const IValue& Output(uint32_t i) const {
     DCHECK(i < outputs_.size());
     return *outputs_[i];
   }
@@ -770,46 +815,8 @@ class TORCH_API BlockRunner {
   std::vector<ProcessedNode> nodes_;
 };
 
-class TORCH_API ProcessedFunction {
- public:
-  ProcessedFunction(
-      Node* node,
-      bool enable_out_variant,
-      bool check_memory_overlap);
-
-  enum class Kind : uint8_t {
-    kOutVariant,
-    kNativeFunction,
-    kInterpreterFallback,
-  };
-
-  void run(ProcessedNode* pnode) const {
-    return f_(pnode);
-  }
-
-  Kind kind() const {
-    return kind_;
-  }
-
-  bool checkMemoryOverlap() const {
-    return check_memory_overlap_;
-  }
-
-  size_t num_outputs() const {
-    return num_outputs_;
-  }
-
- private:
-  SROperator f_;
-  Kind kind_{ProcessedFunction::Kind::kOutVariant};
-  bool check_memory_overlap_{false};
-  size_t num_outputs_{0};
-};
-
-// NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
 class TORCH_API StaticNodeInfo {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   StaticNodeInfo(
       Node* n,
       ProcessedFunction* fn,
@@ -838,6 +845,10 @@ class TORCH_API StaticNodeInfo {
   uint16_t outputs_offset_;
 };
 
+inline size_t BlockInfo::num_nodes() const {
+  return nodes_.size();
+}
+
 /*
   ProcessedNodeMetadata class wraps the possible metadata
   for ProcessedNode. Depending upon the nature of op, processedNode
@@ -855,11 +866,14 @@ class TORCH_API ProcessedNodeMetadata {
 
   ProcessedNodeMetadata() : launcher_(nullptr) {}
 
-  // deleted copy ctor/assigment as standard containers (vector) always
+  // deleted copy ctor/assignment as standard containers (vector) always
   // have copy constructors, but their instantiation is not well-formed
   // if the contained type (BlockRunner) is not copyable
   ProcessedNodeMetadata(const ProcessedNodeMetadata&) = delete;
   ProcessedNodeMetadata& operator=(const ProcessedNodeMetadata&) = delete;
+  ProcessedNodeMetadata(ProcessedNodeMetadata&&) = delete;
+  ProcessedNodeMetadata&& operator=(ProcessedNodeMetadata&&) = delete;
+  ~ProcessedNodeMetadata() = default;
 
   std::vector<BlockRunner>& block_runners() {
     return block_runners_;
@@ -882,10 +896,8 @@ class TORCH_API ProcessedNodeMetadata {
   torch::jit::TaskLauncher* launcher_;
 };
 
-// NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
 class TORCH_API ProcessedNode {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   ProcessedNode() = default;
 
   ProcessedNode(const StaticNodeInfo& other, IValue* values)
@@ -898,12 +910,13 @@ class TORCH_API ProcessedNode {
 
   // These should be noexcept, but some Android build is failing
   // saying the noexcept specification doesn't match the calculated
-  // one. Maybe c10::variant is throwing it off?
+  // one. Maybe std::variant is throwing it off?
   ProcessedNode(ProcessedNode&&) = default;
 
   ProcessedNode(const ProcessedNode&) = delete;
   ProcessedNode& operator=(const ProcessedNode& other) = delete;
   ProcessedNode& operator=(ProcessedNode&&) = default;
+  ~ProcessedNode() = default;
 
   void run();
 
@@ -912,7 +925,7 @@ class TORCH_API ProcessedNode {
   }
 
   // Input is readonly
-  C10_NODISCARD const IValue& Input(uint32_t i) const {
+  [[nodiscard]] const IValue& Input(uint32_t i) const {
     return values_[inputs_[i]];
   }
 
@@ -922,22 +935,22 @@ class TORCH_API ProcessedNode {
     return values_[outputs_offset_ + i];
   }
 
-  C10_NODISCARD const IValue& Output(uint32_t i) const {
+  [[nodiscard]] const IValue& Output(uint32_t i) const {
     DCHECK(i < num_outputs());
     return values_[outputs_offset_ + i];
   }
 
-  size_t num_outputs() const {
+  uint32_t num_outputs() const {
     DCHECK(fn_ != nullptr);
-    return fn_->num_outputs();
+    return static_cast<uint32_t>(fn_->num_outputs());
   }
 
-  C10_NODISCARD c10::ArrayRef<const IValue> outputs() const {
+  [[nodiscard]] c10::ArrayRef<const IValue> outputs() const {
     return c10::ArrayRef<const IValue>(
         values_ + outputs_offset_, num_outputs());
   }
 
-  C10_NODISCARD uint16_t num_inputs() const {
+  [[nodiscard]] uint16_t num_inputs() const {
     return inputs_.size();
   }
 
@@ -979,7 +992,7 @@ class TORCH_API ProcessedNode {
     values_ = values;
   }
 
-  C10_NODISCARD uint16_t output_ivalue_index(uint16_t i) const {
+  [[nodiscard]] uint16_t output_ivalue_index(uint16_t i) const {
     DCHECK(i < num_outputs());
     return outputs_offset_ + i;
   }
@@ -1008,14 +1021,14 @@ class TORCH_API ProcessedNode {
   }
 
  private:
-  C10_NODISCARD bool verify_outputs_dont_overlap_each_other() const;
+  [[nodiscard]] bool verify_outputs_dont_overlap_each_other() const;
 
-  C10_NODISCARD bool verify_inputs_dont_overlap_outputs(bool force_check) const;
+  [[nodiscard]] bool verify_inputs_dont_overlap_outputs(bool force_check) const;
 
-  Node* node_;
-  const ProcessedFunction* fn_;
+  Node* node_{nullptr};
+  const ProcessedFunction* fn_{nullptr};
   ProcessedNodeInputs inputs_;
-  uint16_t outputs_offset_;
+  uint16_t outputs_offset_{0};
   bool overlap_detected_{false};
   IValue* values_ = nullptr; // unowned
   // Metadata for ProcessedNode.
@@ -1131,5 +1144,5 @@ class TORCH_API StaticRuntime {
   IValueArray values_;
 };
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit
+C10_DECLARE_bool(static_runtime_disable_debug_memory_overlap_check);

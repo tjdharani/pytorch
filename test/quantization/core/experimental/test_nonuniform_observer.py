@@ -1,4 +1,5 @@
 # Owner(s): ["oncall: quantization"]
+# ruff: noqa: F841
 
 from torch.ao.quantization.experimental.observer import APoTObserver
 import unittest
@@ -142,7 +143,7 @@ class TestNonUniformObserver(unittest.TestCase):
         quantlevels_test_list = quantization_levels.tolist()
         negatives_contained = True
         for ele in quantlevels_test_list:
-            if not (-ele) in quantlevels_test_list:
+            if -ele not in quantlevels_test_list:
                 negatives_contained = False
         self.assertTrue(negatives_contained)
 
